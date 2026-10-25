@@ -91,6 +91,30 @@ reconnects, N outage identities and one outage card (or N edits with readback en
 duplicates after replay, measured watchdog false positives over 24 h, no subscription leak, zero
 allocations per trade after warmup, gap-heal success and declared-unhealed rates.
 
+## Agents and skills by section
+
+Each subsystem has a lead specialist for its lens and a supporting one for the boundary it touches.
+Agents are advisory roles: they write and review their section's code and tests in-session; nothing
+ships autonomously. Skills are named by the phase they gate.
+
+| Section | Spec | Lead agent | Supporting | Skills |
+|---|---|---|---|---|
+| Feed session, gate, dedup, heal | `docs/feed.md` | general-purpose (Rust systems) | memecoin-venues (payload truth), memecoin-alert-architect (stage boundaries) | `agent-skills:build`, `agent-skills:test` |
+| Registry, lifecycle, eviction | `SCOPE.md` §5 | backend-architect | memecoin-alert-architect | `agent-skills:build`, `agent-skills:test` |
+| Volume anomaly | `docs/volume.md` | alert-tuner | market-economist | `agent-skills:test`, `agent-skills:review` |
+| Discord delivery and cards | `docs/delivery.md` | discord-alert-engineer | security-auditor (name injection, secret redaction) | `agent-skills:build`, `/security-review` |
+| CTO ingestion and wording | `docs/bundle.md` §6 | memecoin-venues | discord-alert-engineer (card copy) | `agent-skills:build`, `agent-skills:test` |
+| Bundle capture and funding graph | `docs/bundle.md` | launch-sniper | memecoin-venues (RPC funding reads), post-migration-reader | `agent-skills:build`, `agent-skills:test` |
+| Gainer ranking, watch set, matching | `docs/ranking.md` | market-economist | alert-tuner (thresholds), memecoin-venues (coverage) | `agent-skills:test`, `agent-skills:review` |
+| Post-migration coverage (PumpSwap/Raydium) | `docs/sources.md` | post-migration-reader | memecoin-venues | `agent-skills:test` |
+| Source verification and credentials | `docs/sources.md` | memecoin-venues | launch-sniper, post-migration-reader | `agent-skills:test` |
+| Operations, config, health, runbook | `docs/operations.md` | memecoin-alert-architect | backend-architect | `agent-skills:build`, `agent-skills:ship` |
+| Whole-system review before each milestone | `SCOPE.md`, `REVIEW.md` | agent-skills:code-reviewer | agent-skills:security-auditor, agent-skills:test-engineer | `agent-skills:review`, `/code-review` |
+
+The docs phase used the lead agents directly without a skill wrapper; the skills above are the
+gates for the build phase. `agent-skills:plan` is used once per milestone to break its spec into
+verifiable tasks, and `agent-skills:constraints` is run before M1 to write the quality bar down.
+
 ## Architecture
 
 Rust workspace, single binary, tokio.

@@ -4,8 +4,8 @@ A Discord alert bot for Solana meme tokens. Rust for the data path, latency as t
 Built from scratch; `~/Projects/volume-scanner` is a reference for observed payload behaviour and
 hard-won lessons only — no code is carried over.
 
-Status: revision 2, 2026-10-25, after the five-lens review in `REVIEW.md`. No code until explicit go
-on M1.
+Status: revision 3, 2026-10-25, consistency pass after the five-lens review in `REVIEW.md`. No code
+until explicit go on M1.
 
 ## 0. Revision log
 
@@ -19,6 +19,33 @@ on M1.
   per-subscription; watchdog and reconnect rules tightened; boot line, heartbeat and dead-man's
   switch added; watch set and message ids given restart semantics. Decisions R1–R9 record the
   choices this revision made.
+- **2026-10-25 — revision 3 (consistency pass).**
+  - Feed spend is one per-UTC-day budget including launch windows (`gate.feed_sol_per_day`, prior
+    0.5 SOL/day), with no launch-window exemption; the cap is an open question.
+  - Trades normalize to `sol_lamports` + `sol_source` (`Payload` | `ReserveDelta`); `solAmount` is
+    optional and the signed vSol delta is derived when it is absent.
+  - `deliver.hold.window_ms` = 45,000 (reordering) is separated from
+    `deliver.budget_wait_max_ms` = 600,000 (budget admission).
+  - The watch set is a discovery set: ~120 candidates/day against a 20/day wallet cap, ~83%
+    suppressed and counted `wallet_budget_suppressed`.
+  - CTO state persists the high-water `claimDate` and a bounded posted-token set; claims below the
+    high-water are counted `suppressed_by_high_water` and are not recovered.
+  - Priority is status/outage > CTO listing > wallet entry > bundle edit > volume fire > volume
+    near.
+  - Block time is resolved only for final candidates and the fee sample; bulk rows use receive
+    time as a labelled proxy.
+  - One message-id store is owned by `deliver/`; detectors keep tiers, not ids.
+  - Registry states are `created | on_curve | near_graduation (display-only) | migrated | dead |
+    unknown`, and `state_seq` increments on every transition.
+  - M1 ships the rank-store schema only; the writer starts in M2a; M1 acceptance counts outage
+    identities and one outage card, not N outage cards.
+  - Six outage identities: `trade_stream`, `cto_source`, `rpc`, `discord:volume`,
+    `discord:wallets`, `discord:cto`.
+  - CTO caps are named `deliver.cto.hourly_cap` = 20 and `deliver.cto.daily` = 120, the latter an
+    outer guard rather than a product allocation.
+  - Heartbeat and outage/status cards form a status lane that bypasses hourly and daily budgets
+    entirely.
+  - A Near bundle tier transition does not edit the card; only Fire and Cleared do.
 
 ## 1. What it does
 
@@ -57,6 +84,9 @@ not measurements.
 - **Floor.** `floor(Δ) = max(1.5 SOL, 2 · Δ/60 s · cohort_median_trade_SOL)`, added to numerator and
   denominator. The floor is part of the signal definition, not a safety net. Signal math is in
   SOL; the USD figure on cards converts with a cached rate and shows its age.
+- **SOL fields.** Trades normalize SOL as `sol_lamports` with a `sol_source` of `Payload` or
+  `ReserveDelta`. The raw `solAmount` is observed but optional; when it is absent, the signed vSol
+  delta is derived from the payload reserves.
 - **Cohort.** An age-banded online distribution of the evaluated ratio (0–5 m, 5–30 m, 30 m–2 h,
   2–6 h, >6 h). Fire additionally requires the ratio to reach the band's p90. This is a live
   percentile over what the bot has seen, never presented as a base rate.
@@ -78,8 +108,12 @@ community-takeover list.
 - **Source shape.** `GET /community-takeovers/latest/v1`, unauthenticated, 60 req/min, no query
   parameters, no boolean flag — membership in the list *is* the signal, and `claimDate` is the only
   takeover-specific field. Polled on a config interval (prior 60 s), filtered client-side to
-  `chainId === "solana"`, diffed against a seen-set keyed on `tokenAddress`, with the high-water
-  `claimDate` persisted so a restart does not drop claims inside the window.
+  `chainId === "solana"`, and diffed against a seen-set keyed on `tokenAddress`. Both the
+  high-water `claimDate` and a bounded posted-token set are persisted and primed on boot without
+  alerting, so a restart does not repost a claim already sent. A claim that first appears below the
+  high-water is counted `suppressed_by_high_water` and is **not** recovered: the retention window
+  can hide a claim from a long restart, and the bot states that limitation rather than promising
+  no missed claims.
 - **Wording.** The card states that the listing certifies someone claimed the token and nothing
   about who holds it. CTO health is independent of trade-stream health and must not imply
   otherwise.
@@ -90,6 +124,8 @@ community-takeover list.
 
 - **Capture.** On every `create` event the bot takes a trade subscription for that mint for a
   ~10 s launch window, then keeps it only if the token passes the trading gate (section 6.1). The
+  window draws from the shared per-UTC-day trade budget; when that budget is exhausted the launch
+  window is refused and `gate.budget_hit` is counted, with no exemption for launch windows. The
   10 s is a **membership filter on when the buy happened**, not a deadline: clustering runs
   afterwards, asynchronously.
 - **Membership.** Wallets funded by the same funder wallet, direct or one hop, that bought inside
@@ -103,16 +139,18 @@ community-takeover list.
   allowed partial. CTOs arrive weeks after launch, so the record must outlive the process. A token
   with no launch record shows `bundle: no launch record`, never 0%.
 - **Percent sold.** SOL-weighted from trade events: opening bag is the first observed balance,
-  sold value is the sum of sell `solAmount`, and the ratio is Σ sold SOL / Σ bought SOL. Wallet
-  count share and absolute SOL are shown beside it. Balance reads are a slow reconciliation, never
-  the headline. Tokens moved to another wallet and sold there are uncounted, and the card says so.
+  sold value is the sum of sell `sol_lamports` (`Payload`, or the derived signed vSol delta where
+  `solAmount` is absent), and the ratio is Σ sold SOL / Σ bought SOL. Wallet count share and
+  absolute SOL are shown beside it. Balance reads are a slow reconciliation, never the headline.
+  Tokens moved to another wallet and sold there are uncounted, and the card says so.
 - **Minimums.** No tier is shown unless the bundle has ≥ 5 wallets, ≥ 10 SOL bought, and ≥ 2% of
   supply. Below that the granularity is meaningless (a two-wallet bundle cannot reach 60% until
   100%).
-- **Tiers and escalation.** Monotonic: 60% *near* (no edit by default), 80% *fire*, 95% *cleared*.
-  Any tier at or above fire posts once if no card exists, otherwise edits the existing card to the
-  latest tier, coalescing skipped tiers. No downward transitions; a stale read marks the field
-  stale and never lowers a tier. At most one edit per message per 30–60 s.
+- **Tiers and escalation.** Monotonic: 60% *near* (no edit; a near transition never edits the
+  card), 80% *fire*, 95% *cleared*. Any tier at or above fire posts once if no card exists,
+  otherwise edits the existing card to the latest tier, coalescing skipped tiers. No downward
+  transitions; a stale read marks the field stale and never lowers a tier. At most one edit per
+  message per 30–60 s.
 - **Price context.** Price at the first bundle sell, now, the 1 h peak, and the change during the
   sell window. Dumped if the fall through that window exceeds 30%. "Cleared" is never shown
   without this context, because selling into strength and dumping on exit are opposite signals.
@@ -125,11 +163,13 @@ open new positions.
 **Ranking contract** (computable, and quoted on every card):
 
 - **Metric.** Realised SOL profit over a rolling 7-day window defined on **trade execution time**,
-  not token launch date. Average cost in integer lamports, computed from raw buys and sells at
-  snapshot time.
+  not token launch date. Block time is resolved only for final candidates and the fee sample; bulk
+  rows use receive time as a labelled proxy, and the card says "7d, execution time where
+  resolved". Average cost in integer lamports, computed from buys and sells normalized to
+  `sol_lamports` + `sol_source` at snapshot time.
 - **Fees.** Priority and network fees are not in the trade stream. They are estimated per trade
-  from a config constant and labelled an estimate; for plausible top candidates they are resolved
-  from `getTransaction`. The card says which.
+  from a config constant and labelled an estimate; for final candidates they are resolved from
+  `getTransaction`. The card says which.
 - **Transfers.** Moving tokens out is not a sale. Wallets with outbound token transfers above a
   config share of their position are excluded from the ranking and counted, because their realised
   PnL is understated rather than known.
@@ -144,19 +184,27 @@ open new positions.
   covered; Raydium is treated as a gap until a live test proves otherwise (section 7).
 - **Watch set.** Top ~40 wallets, config value, not validated. Persisted as a bounded snapshot with
   a generation date and reloaded at boot; a missing or stale snapshot suppresses wallet alerts and
-  counts `watchset_cold` rather than pretending the family is healthy.
+  counts `watchset_cold` rather than pretending the family is healthy. The set is a **discovery
+  set, not a delivery promise**: at ~3 entries per wallet per day it yields ~120 candidates/day
+  against the 20/day wallet cap, so ~83% are suppressed by budget and counted
+  `wallet_budget_suppressed`.
 - **Live matching.** A dedicated account subscription over the watch-set wallets in chunks, so a
-  ranked wallet is seen on any mint, not only on watched ones. **Buys only** fire "entered"; a
+  ranked wallet is seen on any mint, not only on watched ones. The subscription is metered like
+  per-mint trades and draws from the same total per-UTC-day budget, `gate.feed_sol_per_day` (prior
+  0.5 SOL/day), which includes launch windows with no exemption. **Buys only** fire "entered"; a
   sell is a different event and is not announced as a new position. Exits are deferred out of v1;
   the card never implies one.
 - **Dedup and pacing.** Keyed `(wallet, mint, first_seen)`, cooldown 1–4 h per `(wallet, mint)`.
 
 **Rank aggregate store.** Realised PnL needs cost basis per wallet per mint over seven days, which
 cannot live in RAM at pump.fun token counts. A bounded store on disk holds per (wallet, mint):
-buys, sells, weighted cost, realised PnL, first/last trade, pruned by age.
+buys, sells, weighted cost, realised PnL, first/last trade, pruned by age. Each row records the
+registry state it was written under — `created | on_curve | near_graduation (display-only) |
+migrated | dead | unknown` — and the `state_seq`; `state_seq` increments on every transition, so a
+stored row can be checked against the mint's current state.
 
 - Written by one background task with batched commits, never on the alert hot path; started
-  passively in **M2** so the first week of data accumulates while M3 and M4 are built.
+  passively in **M2a** so the first week of data accumulates while M3 and M4 are built.
 - Never read to produce a live alert. It is read once per week to produce the watch set, and the
   card quotes the week.
 - Coverage is journaled with fsync on gap start and end, so a restart cannot turn a gappy week
@@ -215,7 +263,8 @@ crates/
   wallet/      in-RAM watch set, wallet stats, live buy matching
   rank/        rolling 7-day per-(wallet, mint) aggregates, weekly snapshot job
   enrich/      RPC balance/funding reads, cache, TTLs, refresh task
-  deliver/     Discord sender: serialized queue, token bucket, hold queue, dedup, circuit breaker
+  deliver/     Discord sender: serialized queue, token bucket, hold queue, dedup, message-id
+               store, circuit breaker
   config/      thresholds, budgets, routing, timeouts, backoff, caps
   bin/         wiring, health endpoint, supervisor tree, graceful shutdown
 ```
@@ -234,6 +283,9 @@ Rules that apply across crates:
 - **Registry owns every per-mint allocation.** Eviction: idle TTL (prior 30–60 min) → dead; a
   hard live-mint cap with LRU; a tombstone set for recently dead mints. Re-entry allocates a cold
   ring, is counted, and never alerts while cold.
+- **Registry states are fixed.** A mint is `created | on_curve | near_graduation (display-only) |
+  migrated | dead | unknown`; `state_seq` increments on every transition, and a card or stored row
+  quotes the state and sequence it was computed under.
 - **Dedup** keyed on `(signature, mint, trader, txType, tokenAmount)` or signature plus
   transaction index where available — one transaction can contain several trades — sized by
   `rate × (replay + heal window) × 1.5`, not by time alone.
@@ -261,9 +313,15 @@ So the gate is part of the architecture, not an optimisation:
 - **Eligibility.** Every launch gets a ~10 s trade subscription to capture its launch window (at
   roughly 0.23 launches/s that is ~2–3 concurrent). It keeps the subscription only if the token
   passes the trading gate: a config dollar volume in the first minutes, or a CTO listing.
-- **Caps and TTL.** A hard cap on concurrent subscriptions, a per-mint TTL, unsubscribe on prune,
-  and a reconcile task. `subs_live`, `unsub_failed`, `subs_capped`, `events_per_sec` and
-  `estimated_sol_per_day` are config values and `/health` counters.
+- **Spend budget.** All trade subscriptions draw from one total per-UTC-day budget,
+  `gate.feed_sol_per_day` (**PRIOR** 0.5 SOL/day), including every launch window; there is no
+  launch-window exemption. At 0.5 SOL/day the budget is ~500,000 messages/day, ~5.8 msg/s
+  sustained, so the spend cap binds long before the 20-slot concurrent-subscription cap. When it is
+  hit, new subscriptions and launch windows are refused and `gate.budget_hit` is counted. Open
+  question: confirm the spend budget, because it determines how many mints can be watched.
+- **Caps and TTL.** A hard cap on concurrent subscriptions (prior 20 slots), a per-mint TTL,
+  unsubscribe on prune, and a reconcile task. `subs_live`, `unsub_failed`, `subs_capped`,
+  `events_per_sec` and `estimated_sol_per_day` are config values and `/health` counters.
 - **Single socket invariant**, asserted at runtime. No parallel probe connections.
 
 It can tell us it disconnected. It **cannot** tell us it dropped messages while staying connected:
@@ -275,7 +333,7 @@ itself as **single-source, unverified** and never claims that silence means a qu
 
 | Failure | Detected by | Response | User-visible |
 |---|---|---|---|
-| Socket close, DNS, TLS | transport error | reconnect with capped backoff + jitter, after a probe (6.3) | health; one outage card per subsystem |
+| Socket close, DNS, TLS | transport error | reconnect with capped backoff + jitter, after a probe (6.3) | health; one outage card per outage identity |
 | Silent stall (connected, no events) | new-token liveness + adaptive threshold | mark suspected, probe, reconnect only if the probe disagrees | degraded tag |
 | Malformed / unknown payload | decode error | count, sample first N, drop, never crash-loop | decode-error counter |
 | Duplicate events | dedup key | drop | dup counter |
@@ -288,8 +346,9 @@ itself as **single-source, unverified** and never claims that silence means a qu
 
 Event time: the trade payload carries **no timestamp and no slot** (observed, not documented). The
 bot therefore buckets on a monotonic receive time, anchored to the arrival of that token's
-`create` event, and says so. True block time is resolved via `getTransaction` only where it matters
-— the launch-window audit and a late-trade sample — labelled resolution, not routing.
+`create` event, and says so. True block time is resolved via `getTransaction` only for specific
+uses — the launch-window audit, a late-trade sample, and the ranking's final candidates with their
+fee sample — labelled resolution, not routing.
 
 ### 6.3 Hardening the primary
 
@@ -312,9 +371,10 @@ bot therefore buckets on a monotonic receive time, anchored to the arrival of th
   within tolerance.
 - **Warmup.** Any restart or heal leaves baselines cold; alerts are suppressed while a mint's ring
   warms, and the suppression is counted.
-- **Restart semantics.** CTO state is primed on boot from the first poll without alerting; message
-  ids are either restored from the bot-token path below or the card contract degrades honestly; the
-  watch set is reloaded from its snapshot or the wallet family is suppressed and counted.
+- **Restart semantics.** CTO high-water `claimDate` and the bounded posted-token set are primed on
+  boot from the first poll without alerting; message ids are either restored from the bot-token
+  path below or the card contract degrades honestly; the watch set is reloaded from its snapshot or
+  the wallet family is suppressed and counted.
 
 ### 6.4 Shadow verification, not fake HA
 
@@ -350,8 +410,10 @@ and is its own milestone.
 
 ### 6.6 Degradation contract
 
-Degradation is **per subsystem** — `trade_stream`, `cto_source`, `rpc`, `discord` — not global,
-because CTO health is independent of trade health.
+Degradation is **per outage identity** — `trade_stream`, `cto_source`, `rpc`, `discord:volume`,
+`discord:wallets`, `discord:cto` — not global, because CTO health is independent of trade health.
+Component states map into the five subsystem states below; volume close-lag is a component
+condition, not `degraded`.
 
 | State | Meaning | Alerts |
 |---|---|---|
@@ -361,9 +423,9 @@ because CTO health is independent of trade health.
 | unverified | single source, no shadow evidence | posted; footer says data is unverified |
 | stale | no event longer than threshold | suppressed; outage card only |
 
-- **Outage identity** is `(subsystem, outage_start)`. Declared after 30 s, recovered after 60 s of
-  health, so a blip posts nothing. The outage card bypasses the alert budget and states start,
-  end, duration and reason.
+- **Outage identity** is `(identity, outage_start)`. Declared after 30 s, recovered after 60 s of
+  health, so a blip posts nothing. The outage card is in the status lane and bypasses the hourly
+  and daily alert budgets entirely; it states start, end, duration and reason.
 - **One outage card per process lifetime**, unless the bot-token readback path is enabled, in which
   case the card is found by footer marker and edited. Webhooks cannot read history; the contract
   says which behaviour is in force.
@@ -373,7 +435,9 @@ because CTO health is independent of trade health.
   feed mode, subscription count. **Heartbeat** edited in place every N minutes with the funnel
   (seen → gated → detected → enriched → ranked → sent), drops by reason, edits by tier,
   warmup/suppression counts, shadow disagreement, `blind_seconds_1h`, and last successful
-  delivery per webhook.
+  delivery per webhook. Heartbeat and outage/status cards form the status lane and bypass hourly
+  and daily budgets entirely: a 5-minute heartbeat is 12 posts/hour and would otherwise exceed the
+  volume channel's 10/hour.
 - Every card footer carries feed health whenever the state is not normal.
 
 ## 7. Data sources and provenance
@@ -405,22 +469,30 @@ Three webhooks, one per family, each with its own serialized queue, token bucket
 |---|---|---|
 | volume | volume fire, volume near | ~10/hr, capacity 2–3, *near* ≤ 30% |
 | wallets | wallet entries | ~6/hr |
-| cto | CTO listing, bundle tier edits | safety cap ~20/hr |
+| cto | CTO listing, bundle tier edits | `deliver.cto.hourly_cap` = 20/hr (circuit breaker) |
 
 Daily caps (prior 40 volume, 20 wallets) are the binding attention limit; hourly budgets are
-burst control. A sliding window is used so two bursts cannot straddle a boundary. CTO's cap is a
-circuit breaker, not a product budget.
+burst control. A sliding window is used so two bursts cannot straddle a boundary.
+`deliver.cto.hourly_cap` = 20 is a circuit breaker, not a product budget; `deliver.cto.daily` = 120
+is an outer guard, not a product allocation. The status lane — heartbeat and outage/status cards —
+bypasses both hourly and daily budgets entirely; a 5-minute heartbeat is 12 posts/hour and would
+otherwise exceed the volume channel's 10/hour.
 
-**Priority classes,** used only before send: status/outage > CTO listing > bundle edit > volume
-fire > volume near. A token bucket alone is first-come-first-served, so non-urgent cards wait in a
-30–60 s hold queue and the highest class is admitted when a token is available. Two of the volume
-hour's ten tokens are reserved for fire. Priority decides which alert survives a full budget, never
-whether the budget is exceeded.
+**Priority classes,** used only before send: status/outage > CTO listing > wallet entry > bundle
+edit > volume fire > volume near. A token bucket alone is first-come-first-served. Non-urgent
+cards — volume *near* and wallet entries — wait in a reordering hold of `deliver.hold.window_ms` =
+45,000 ms; this is separate from `deliver.budget_wait_max_ms` = 600,000 ms, the maximum wait for
+budget admission that applies to fire, CTO listings and bundle edits. The 6–10 minute admission
+figure refers to `budget_wait_max_ms` only, not to the hold. The highest class is admitted when a
+token is available. Two of the volume hour's ten tokens are reserved for fire. Priority decides
+which alert survives a full budget, never whether the budget is exceeded.
 
-**Message ids and edits.** Every post uses `?wait=true`; the response's message id is stored with
-`(mint, family, tier, card_state)`. Edits rebuild the full embed from that state. A missing id is a
-delivery failure, not a success. Posts and edits share the webhook's rate bucket, so one serialized
-queue covers both; one edit per message per 30–60 s, coalesced to the latest tier.
+**Message ids and edits.** One id store, owned by `deliver/`; detectors keep tiers, not ids. Every
+post uses `?wait=true`; the response's message id is stored with `(mint, family, tier,
+card_state)`. Edits rebuild the full embed from that state. A missing id is a delivery failure, not
+a success. Posts and edits share the webhook's rate bucket, so one serialized queue covers both;
+one edit per message per 30–60 s, coalesced to the latest tier. For bundle cards, only Fire and
+Cleared tier transitions edit; a Near transition does not edit.
 
 **Error classification** (status plus Discord error code), per webhook:
 
@@ -462,18 +534,20 @@ failure behaviour is written down.
    **payload fixture and pinned schema**, subscription gate and ledger, supervisor, watchdog,
    generations, dedup, registry/lifecycle with eviction, receive-time bucketing, `/health` with
    boot line and heartbeat, minimal sender (`wait=true`, startup check, outage card), rank-store
-   schema and passive writer. No signal alerts.
+   schema only (writer starts M2a). No signal alerts.
    *Acceptance:* observed events/min within X% of a reference count over one hour; N forced
-   disconnects produce N reconnects, N outage cards, 0 duplicate trades after replay; measured
-   watchdog false positives over 24 h; no subscription leak over 24 h; zero allocations per trade
-   after warmup; gap-heal success rate and declared-unhealed rate.
+   disconnects produce N reconnects, N outage identities and one outage card (or N edits with
+   readback enabled), 0 duplicate trades after replay; measured watchdog false positives over
+   24 h; no subscription leak over 24 h; zero allocations per trade after warmup; gap-heal success
+   rate and declared-unhealed rate.
 2. **M2a — Delivery proven.** Budgets, hold queue, priority classes, dedup/cooldown, degradation
-   contract, card template and validator, exercised with synthetic alerts into staging channels.
+   contract, rank-store passive writer, card template and validator, exercised with synthetic
+   alerts into staging channels.
 3. **M2b — Volume family.** Per-mint ring and parameters, cohort percentiles, dispersion and
    participation tests, cold-baseline path, shadow probe and disagreement metric. First real
    alerts.
-4. **M3 — CTO family.** Poll, solana filter, diff with persisted `claimDate`, latched per mint,
-   wording.
+4. **M3 — CTO family.** Poll, solana filter, diff with persisted high-water `claimDate` and
+   posted-token set, latched per mint, wording.
 5. **M4 — Bundle.** Launch-record persistence, funding stage with exclusion list and fan-out cap,
    percent-sold from trades, tier state machine on the CTO card.
 6. **M5 — Wallets.** Ranking job, watch-set snapshot and boot reload, account subscription, buy
@@ -484,7 +558,9 @@ failure behaviour is written down.
 1. **Q1 — "fomo": answered 2026-10-25.** pump.fun only; the weekly ranking is reconstructed
    from pump.fun trades. FOMO is not a data source.
 2. **Q2 — Top gainer definition: answered 2026-10-25, revised with the review.** Realised SOL
-   profit over 7 days on execution time, average cost in lamports, estimated fees labelled as
+   profit over 7 days on execution time where resolved — block time is resolved only for final
+   candidates and the fee sample, bulk rows use receive time as a labelled proxy, and the card
+   says "7d, execution time where resolved" — average cost in lamports, estimated fees labelled as
    such, transfers excluded and counted, mark-to-market at close, sybil clustering, breadth ≥ 2
    with ≥ 1 SOL per mint.
 3. **Q3 — Bundle rule: answered 2026-10-25, revised.** Same funder (direct or one hop), buy inside
@@ -494,10 +570,11 @@ failure behaviour is written down.
    sold, tiers at 60/80/95, minimums of 5 wallets, 10 SOL and 2% supply, price context mandatory,
    edit-in-place with coalescing.
 5. **Q5 — CTO source: answered 2026-10-25, revised.** DexScreener community-takeover list, filtered
-   to Solana, diffed, high-water `claimDate` persisted; non-pump.fun claims post with fields
-   marked unavailable.
+   to Solana, diffed, high-water `claimDate` and a bounded posted-token set persisted; non-pump.fun
+   claims post with fields marked unavailable.
 6. **Q6 — Channels: answered 2026-10-25, revised.** Three webhooks with capacity 2–3, budgets
-   10/6/20 per hour, daily caps as the binding limit, priority classes and a hold queue.
+   10/6/20 per hour, daily caps as the binding limit for volume and wallets, the CTO daily cap an
+   outer guard, priority classes and a hold queue.
 7. **R1 — Time basis.** Bucket on monotonic receive time anchored to `create`; the payload has no
    timestamp or slot. Resolve block time only for audits. *2026-10-25.*
 8. **R2 — Feed cost contract.** Per-mint metered subscriptions, launch-window subscription for
@@ -507,15 +584,15 @@ failure behaviour is written down.
    bundle status survives to CTO time. *2026-10-25.*
 10. **R4 — Percent sold from trades.** SOL-weighted from trade events and `newTokenBalance`;
     balances reconcile only. *2026-10-25.*
-11. **R5 — Delivery contract.** `wait=true`, message ids in RAM, error-code classification,
-    at-most-once posts, one serialized queue per webhook, one outage card per process lifetime
-    unless readback is enabled. *2026-10-25.*
+11. **R5 — Delivery contract.** `wait=true`, one message-id store owned by `deliver/`,
+    error-code classification, at-most-once posts, one serialized queue per webhook, one outage
+    card per process lifetime unless readback is enabled. *2026-10-25.*
 12. **R6 — Watch set persists.** Bounded snapshot with generation, reloaded at boot; cold means
     suppressed and counted. *2026-10-25.*
-13. **R7 — Rank store starts in M2.** Passive accumulation so the first watch set is available at
+13. **R7 — Rank store starts in M2a.** Passive accumulation so the first watch set is available at
     M5 rather than M5 + 7 days. *2026-10-25.*
-14. **R8 — Per-subsystem degradation.** Trade, CTO, RPC and Discord degrade independently; status
-    cards bypass the alert budget. *2026-10-25.*
+14. **R8 — Per-identity degradation.** Trade, CTO, RPC and the three Discord channels degrade
+    independently; status cards bypass the alert budget. *2026-10-25.*
 15. **R9 — Signal math in SOL.** Dollar display converts with a cached rate and shows its age; the
     signal never depends on an FX feed. *2026-10-25.*
 
@@ -531,5 +608,6 @@ Changes get a dated entry here rather than a silent edit.
   webhook). Measure against staging and record the numbers with a date.
 - Post-migration coverage (PumpSwap versus Raydium) is unverified; the ranking treats Raydium as a
   gap until tested.
-- DexScreener's CTO list retention window is a sample of one; a long restart may miss claims, which
-  is why the high-water `claimDate` is persisted.
+- DexScreener's CTO list retention window is a sample of one; a long restart may miss claims. The
+  high-water `claimDate` and bounded posted-token set prevent reposts, but a claim below the
+  high-water is counted `suppressed_by_high_water` and is not recovered.

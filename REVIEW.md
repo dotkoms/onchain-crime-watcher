@@ -50,7 +50,8 @@ statistic degrades as the process ages.
 
 Fix: `registry/` between decode and every consumer, owning
 `mint -> { created_at, state, state_seq, ring, enrich, bundle, last_seen }`. States:
-`created → on_curve → migrated → dead`, with `unknown` for tokens first seen mid-life. Eviction on
+`created → on_curve → migrated → dead`, with `unknown` for tokens first seen mid-life;
+`near_graduation` is a display-only later addition, not a lifecycle state. Eviction on
 idle TTL, then LRU to a hard cap; re-entry allocates a cold ring and is counted
 (`mint_reentered_cold`) and never alerts while cold. On migration, reset or rebase the volume
 baseline and count `regime_reset`; cards stamp the regime. Every candidate carries `state` and
@@ -65,9 +66,9 @@ Three separate gaps, each fatal alone:
 
 1. **Same-funder is not in the trade stream.** Trade messages name only `traderPublicKey`; who
    funded that wallet is a prior SOL transfer requiring `getSignaturesForAddress(wallet)` plus
-   `getTransaction` on the funding tx — roughly 11 credits per wallet, 70–90 HTTP calls and ~1,000
-   credits for a 40-wallet CTO *(per today's Helius pricing; verify tier)*. Affordable per CTO
-   because CTOs are rare; not affordable per launch.
+   `getTransaction` on the funding tx — roughly 11 credits per wallet (70–90 HTTP calls), ~1,000
+   credits per 80-wallet CTO (~11 per wallet) *(per today's Helius pricing; verify tier)*.
+   Affordable per CTO because CTOs are rare; not affordable per launch.
 2. **The launch window is RAM-only, CTOs arrive weeks later.** The 10-second buyer set and opening
    bags exist only if the bot watched the launch, and idle mints are pruned. At CTO time the data
    is gone. The doc's own §3 forbids "any database that the alert path depends on", which
@@ -91,10 +92,12 @@ record exists, the card says `bundle: no launch record`, never 0%.
 Sections 4, 6.2, 6.3. Latency and provenance reviewers, independently.
 
 The trade payload is
-`bondingCurveKey, marketCapSol, mint, newTokenBalance, signature, tokenAmount, traderPublicKey,
-txType, vSolInBondingCurve, vTokensInBondingCurve` — no `timestamp`, no `slot`, no `blockTime`
-*(observed from a captured payload and the working client; vendor publishes no schema)*. The
-working scanner buckets on `Date.now()` for exactly this reason.
+`bondingCurveKey, marketCapSol, mint, newTokenBalance, signature, solAmount, tokenAmount,
+traderPublicKey, txType, vSolInBondingCurve, vTokensInBondingCurve` — no `timestamp`, no `slot`, no
+`blockTime` *(observed from a captured payload and the working client; vendor publishes no
+schema)*. `solAmount` is observed in the working client (`state.mjs:67`, `ingest.mjs:78`) but absent
+from the captured sample, so it is present-but-unpinned until the M1 fixture. The working scanner
+buckets on `Date.now()` for exactly this reason.
 
 So "bucket by event time, not arrival", "late beyond window", and the feed-lag row of the latency
 table are all unimplementable as written.
@@ -244,7 +247,8 @@ Section 2C, Q2. Statistics and provenance reviewers.
   pre-send validator, colour paired with a word, and a redacted-payload log on failure.
 - **H12 — CTO source is a global list, not a flag.** Verified live: `GET
   /community-takeovers/latest/v1`, unauthenticated, 60 req/min, no parameters, no boolean field —
-  inclusion is the signal, `claimDate` is the only takeover-specific field, ~6 entries in ~36 h.
+  inclusion is the signal, `claimDate` is the only takeover-specific field, ~6 entries in ~18.6 h
+  at the 2026-10-25T17:25Z fetch.
   Fix: client-side `chainId === 'solana'` filter, diff against a seen-set keyed on `tokenAddress`,
   persist the high-water `claimDate` across restarts, and decide explicitly whether non-pump.fun
   CTOs alert.

@@ -3,24 +3,28 @@
 A Discord alert bot for Solana meme tokens. Rust for the data path, latency as the design axis,
 built from scratch.
 
-**Status: scope revision 3 (consistency pass) after a five-lens review (`REVIEW.md`), no code yet.
-Next: M1.**
+**Status: scope revision 4 (reference crawl) after the consistency pass and five-lens review, no
+code yet. Next: M1.**
 
-The contract is [SCOPE.md](SCOPE.md). The review that reshaped it is [REVIEW.md](REVIEW.md). This
-README is the readable plan.
+The contract is [SCOPE.md](SCOPE.md). The review that reshaped it is [REVIEW.md](REVIEW.md), and the
+public projects it was checked against are catalogued in [docs/references.md](docs/references.md).
+This README is the readable plan.
 
 ## Signals
 
 **Volume anomaly.** Per-mint volume against its own recent past and its age band. 15-second
 buckets over a 7.5-minute ring, trimmed-mean baseline, dispersion and participation tests, and an
 interval-scaled floor in SOL. Fire / near / reject, with *near* capped so it never crowds out a
-fire. Cold tokens route to a labelled cold-baseline path instead of dividing by nothing.
+fire. Cold tokens route to a labelled cold-baseline path instead of dividing by nothing. If the
+participation gate proves noisy on live data, buyer breadth is the next feature — not a lower
+threshold.
 
 **CTO, with bundle status.** DexScreener's community-takeover list, filtered to Solana and diffed,
 worded as a claim on a curated feed. The card adds bundle status: wallets funded by the same
 funder (direct or one hop) that bought inside the ~10 s launch window, tracked as the SOL-weighted
 share of their bags sold — 60% near, 80% fire, 95% cleared, escalating by editing one card. A
-token with no launch record says so; it never shows a confident 0%.
+token with no launch record says so; it never shows a confident 0%. Repeated Jito tip payers are
+recorded as corroborating evidence for a bundle, never as a membership rule on their own.
 
 **Gainer wallets.** The previous week's most profitable wallets on pump.fun, reconstructed
 on-chain: realised SOL profit on execution time where resolved (receive time otherwise, labelled),
@@ -28,7 +32,9 @@ average cost in lamports, sybil clustering, at least two profitable mints with �
 each, mark-to-market at close. Top ~40 wallets form a watch set that is persisted and reloaded at
 boot; it is a discovery set, not a delivery promise — at ~3 entries per wallet per day it yields
 ~120 candidates/day against the 20/day wallet cap, so ~83% are suppressed by budget and counted
-`wallet_budget_suppressed`. Buys only fire "entered".
+`wallet_budget_suppressed`. Buys only fire "entered". Funder clustering follows the launch-window
+rule; a public detector's 5-children-in-5-minutes default is recorded as a second opinion, not
+adopted.
 
 **Coverage is bounded and stated.** Trades are metered per mint, so the bot watches a chosen subset.
 Every ranking and card says which subset it was computed over. Trade spend is one total
@@ -162,7 +168,9 @@ bounded — because program-wide healing cannot keep up with pump.fun's rate. Th
 free new-token stream for liveness and probes before reconnecting, so it cannot manufacture the gap
 it would then fail to heal. One socket, asserted. Dedup is keyed per trade because one transaction
 can hold several. Degradation is per outage identity, and the status lane — heartbeat and
-outage/status cards — bypasses both hourly and daily budgets.
+outage/status cards — bypasses both hourly and daily budgets. A parsed but unresolved event is
+evidence of a transaction, not of volume: it is held as `unknown`, excluded from buckets, and
+counted until resolved.
 
 ## Delivery
 
@@ -197,7 +205,18 @@ stripped. `--dry` and `--startup-check` exist, and staging webhooks are exercise
 | R8 | Degradation per outage identity; status lane bypasses budgets. |
 | R9 | Signal math in SOL; USD is display only. |
 
+## References
+
+The public projects checked against this design — official pump.fun docs, Geyser parsers, launch
+tooling, wallet clustering and PnL projects — are catalogued with stars, licenses and relevance in
+[docs/references.md](docs/references.md). Nothing was cloned and no code is reused. There is no
+mature open-source Discord alert bot for this domain, so the delivery layer is ours.
+
 ## Not in scope
 
 Backtesting, paper trading, portfolio tracking, order placement, dashboards, multi-chain, hot
 failover between feeds, and exit alerts for watched wallets in v1.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

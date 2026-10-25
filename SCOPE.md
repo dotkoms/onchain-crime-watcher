@@ -4,7 +4,7 @@ A Discord alert bot for Solana meme tokens. Rust for the data path, latency as t
 Built from scratch; `~/Projects/volume-scanner` is a reference for observed payload behaviour and
 hard-won lessons only — no code is carried over.
 
-Status: revision 3, 2026-10-25, consistency pass after the five-lens review in `REVIEW.md`. No code
+Status: revision 4, 2026-10-25, reference-crawl pass after the consistency pass. No code
 until explicit go on M1.
 
 ## 0. Revision log
@@ -46,6 +46,17 @@ until explicit go on M1.
   - Heartbeat and outage/status cards form a status lane that bypasses hourly and daily budgets
     entirely.
   - A Near bundle tier transition does not edit the card; only Fire and Cleared do.
+- **2026-10-25 — revision 4 (reference crawl).** Five changes drawn from the public projects
+  catalogued in `docs/references.md`:
+  - A parsed but unresolved event is evidence of a transaction, not of volume. Unresolved
+    candidates are held as `unknown`, excluded from buckets, and counted until resolved.
+  - Buyer breadth is the next candidate feature for the volume family if the participation gate
+    proves noisy on live data; it is not enabled in v1.
+  - Repeated Jito tip payers are part of the funding-stage evidence for a launch bundle.
+  - A public cluster detector's default (a funder with 5+ children inside a 5-minute window) is a
+    second opinion on the bundle fan-out prior; it does not change the contract value of 50.
+  - No mature open-source Discord alert bot exists for this domain, so the delivery spec remains
+    ours rather than adapted from an upstream.
 
 ## 1. What it does
 
@@ -81,6 +92,10 @@ not measurements.
   same. Fire also requires `current ≥ median + max(4 · 1.4826 · MAD, 0.5 · median)`.
 - **Participation.** At least 5 distinct takers in the bucket and no single taker above 60% of its
   volume, so one wallet cannot print a spike with a buy and a sell.
+- **Buyer breadth (not enabled in v1).** If the participation test proves noisy on live data, the
+  next feature is breadth — distinct buyers versus distinct sellers over the bucket — rather than
+  a lower threshold. Public research bots score it alongside volume and velocity, and it separates
+  a real crowd from one wallet cycling.
 - **Floor.** `floor(Δ) = max(1.5 SOL, 2 · Δ/60 s · cohort_median_trade_SOL)`, added to numerator and
   denominator. The floor is part of the signal definition, not a safety net. Signal math is in
   SOL; the USD figure on cards converts with a cached rate and shows its age.
@@ -134,6 +149,13 @@ community-takeover list.
   infrastructure; its children are excluded and the bundle is marked `partial`. A known-account
   list (exchanges, routers, programs) is excluded. Two-hop funding is not followed and the card
   says so.
+- **Corroborating evidence.** Repeated Jito tip payers across the launch wallets are recorded as
+  funding-stage evidence and raise confidence, but never exclude or admit a wallet on their own.
+  Public bundler tooling names same-block buys, one funder, lookup tables and repeated Jito tips as
+  the observable signature; we use the first two as rules and the last two as evidence.
+- **Cluster prior.** A public cluster detector defaults to a funder with 5+ children funded inside
+  a 5-minute window. That is a second opinion on our 50-child fan-out cap, not a change to it: our
+  rule is about the ~10 s launch burst, where a lower number would misclassify ordinary snipers.
 - **Persistence.** The launch record — mint, t0, launch buyers, opening bags, funder clusters —
   is written to the bounded side store in section 2C's contract: off the hot path, prunable,
   allowed partial. CTOs arrive weeks after launch, so the record must outlive the process. A token
@@ -323,6 +345,11 @@ So the gate is part of the architecture, not an optimisation:
   unsubscribe on prune, and a reconcile task. `subs_live`, `unsub_failed`, `subs_capped`,
   `events_per_sec` and `estimated_sol_per_day` are config values and `/health` counters.
 - **Single socket invariant**, asserted at runtime. No parallel probe connections.
+- **Unresolved is not a fill.** A raw Geyser or ShredStream event the decoder cannot resolve to a
+  concrete trade is held as `unknown`, excluded from buckets and aggregates, and counted
+  `unresolved_events`. It becomes volume only when resolved against the transaction. Public
+  streaming SDKs state the same rule; treating a candidate as a fill inflates volume exactly when
+  the feed is degraded.
 
 It can tell us it disconnected. It **cannot** tell us it dropped messages while staying connected:
 no sequence numbers, no replay, no gap marker. Any "gap detection" built only on the feed's own
@@ -340,6 +367,7 @@ itself as **single-source, unverified** and never claims that silence means a qu
 | Late / out-of-order trades | receive time vs bucket | bucket by receive time; late events counted and applied to aggregates, excluded from spike baselines | late counter |
 | 429 / auth failure | HTTP status | backoff, escalate after N | health red, outage card |
 | Provider partial fields | schema validation | reject the event, count | field-missing counter |
+| Parsed but unresolved event | decoder resolution | hold as `unknown`, exclude from buckets and aggregates, count `unresolved_events` until resolved | unresolved counter |
 | Panic | `JoinHandle` join error | respawn under restart budget | restart counter |
 | Backpressure | channel class | delta channels never drop; event channels drop with a count | drop-by-reason counter |
 | Ban (excess connections) | repeated timeouts | stop restarting, health red, wait out the hour | banned state |

@@ -84,3 +84,12 @@ heal_enabled = false
 calls_per_day = 50000
 calls_per_minute = 600
 interval_s = 30
+
+# Independent curated community-takeover listings. Disabled until explicitly enabled.
+[cto]
+enabled = false
+staging_delivery = false
+# channel_id = "YOUR_DISTINCT_CTO_STAGING_CHANNEL_ID"
+poll_s = 60
+hourly_cap = 20
+daily_cap = 120

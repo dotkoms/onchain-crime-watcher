@@ -122,6 +122,16 @@ pub fn check(
             "distinct_status_and_staging_webhooks_required",
         );
     }
+    if config.cto.staging_delivery {
+        let target = env("OCW_DISCORD_CTO_URL").and_then(|raw| discord::webhook_url(&raw).ok());
+        let staging_target =
+            env("OCW_DISCORD_STAGING_URL").and_then(|raw| discord::webhook_url(&raw).ok());
+        add(
+            "discord_cto",
+            staging && target.is_some() && target != status_url && target != staging_target,
+            "explicit_staging_flag_and_distinct_cto_webhook_required_format_only",
+        );
+    }
     if config.probe.enabled {
         let rpc = env("SOLANA_RPC_URL").filter(|v| !v.is_empty());
         add(
@@ -146,7 +156,7 @@ pub fn check(
         );
     }
     let ready = checks.iter().all(|row| row["ready"] == true);
-    json!({"mode":"offline_preflight","configuration_ready":ready,"network":"disabled","production_ready":false,"external_acceptance":"not_checked","checks":checks,"pending_product_features":["full_decision_backtesting","cto_alerts","bundle_tracking","wallet_rankings_and_alerts","secondary_provider_failover"]})
+    json!({"mode":"offline_preflight","configuration_ready":ready,"network":"disabled","production_ready":false,"external_acceptance":"not_checked","checks":checks,"pending_product_features":["full_decision_backtesting","bundle_tracking","wallet_rankings_and_alerts","secondary_provider_failover"]})
 }
 #[cfg(test)]
 mod tests {

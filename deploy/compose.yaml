@@ -27,7 +27,7 @@ services:
     # only after the corresponding offline preflight and external acceptance.
     command: [--live, --config, /etc/ocw/config.toml, --preview-volume]
     restart: "on-failure:3"
-    stop_grace_period: 30s
+    stop_grace_period: 45s
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

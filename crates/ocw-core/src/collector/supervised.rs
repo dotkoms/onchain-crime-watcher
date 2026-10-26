@@ -51,6 +51,12 @@ pub(super) async fn run(
             .catch_unwind()
             .await
         {
+            Ok(Err(_)) if config.cto.enabled => {
+                set_state(&pipeline.health.feed_state, "failed");
+                supervision::red(&pipeline.health, "pipeline");
+                pipeline.control("trade_feed_stopped",json!({"reason":"recovery_policy_stopped","cto":"independent_worker_continues"}));
+                return std::future::pending().await;
+            }
             Ok(result) => return result,
             Err(_) => {
                 inc(&pipeline.health.pipeline_panics);
@@ -202,5 +208,36 @@ mod tests {
         );
         stop.send(()).unwrap();
         server.await.unwrap().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod family_isolation_tests {
+    use super::*;
+    struct FailedFeed(usize);
+    impl Source for FailedFeed {
+        async fn attempt(&mut self, _: &mut Pipeline, _: bool) -> Result<(), String> {
+            self.0 += 1;
+            Err("feed stopped".into())
+        }
+    }
+    #[tokio::test]
+    async fn exhausted_trade_recovery_does_not_terminate_the_process_when_cto_is_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut pipeline, _) = pipeline_for_test(&dir.path().join("data"));
+        let mut config = Config::default();
+        config.cto.enabled = true;
+        let mut source = FailedFeed(0);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                run(&mut pipeline, &mut source, &config, false)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(source.0, 1);
+        assert_eq!(pipeline.health.snapshot()["feed"]["state"], "failed");
+        assert_eq!(pipeline.health.snapshot()["supervision"]["pipeline"], "red");
     }
 }

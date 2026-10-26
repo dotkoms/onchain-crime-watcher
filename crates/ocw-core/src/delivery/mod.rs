@@ -1,5 +1,5 @@
 //! Explicitly enabled staging delivery; never used for replay or generated inputs.
-mod http;
+pub(crate) mod http;
 mod policy;
 mod store;
 #[cfg(test)]

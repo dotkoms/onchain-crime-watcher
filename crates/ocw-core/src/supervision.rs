@@ -60,7 +60,9 @@ impl RestartBudget {
     }
 }
 pub(crate) fn red(health: &Health, stage: &'static str) {
-    set_state(&health.supervisor_state, "red");
+    if stage != "cto" {
+        set_state(&health.supervisor_state, "red");
+    }
     let state = match stage {
         "pipeline" => &health.pipeline_state,
         "capture" => &health.capture_worker_state,
@@ -68,6 +70,7 @@ pub(crate) fn red(health: &Health, stage: &'static str) {
         "health" => &health.health_worker_state,
         "monitor" => &health.monitor_worker_state,
         "history" => &health.history_state,
+        "cto" => &health.cto_worker_state,
         _ => unreachable!("fixed internal stage"),
     };
     if let Ok(mut current) = state.lock() {

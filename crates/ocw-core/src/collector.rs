@@ -392,6 +392,27 @@ async fn run_inner(
                 .into(),
         );
     }
+    if config.cto.enabled && options.fixture.is_some() {
+        return Err("CTO polling requires live mode".into());
+    }
+    if config.cto.staging_delivery && !options.staging_delivery {
+        return Err("CTO staging delivery requires --enable-staging-delivery".into());
+    }
+    if config.cto.staging_delivery {
+        let raw =
+            std::env::var("OCW_DISCORD_CTO_URL").map_err(|_| "OCW_DISCORD_CTO_URL is required")?;
+        let url = crate::discord::webhook_url(&raw)?;
+        if [
+            secrets.webhook.as_deref(),
+            secrets.staging_webhook.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|raw| crate::discord::webhook_url(raw).ok().as_ref() == Some(&url))
+        {
+            return Err("CTO delivery requires a distinct webhook".into());
+        }
+    }
     let lock = Arc::new(
         ProcessLock::acquire(&config.data_dir)
             .map_err(|_| "cannot acquire private data directory/collector lock")?,
@@ -461,6 +482,37 @@ async fn run_inner(
             "disabled"
         },
     );
+    set(&health.cto_enabled, u64::from(config.cto.enabled));
+    set_state(
+        &health.cto_worker_state,
+        if config.cto.enabled {
+            "starting"
+        } else {
+            "disabled"
+        },
+    );
+    set_state(
+        &health.cto_state,
+        if config.cto.enabled {
+            "starting"
+        } else {
+            "disabled"
+        },
+    );
+    let mut cto_runtime = if config.cto.enabled {
+        Some(
+            crate::cto::runtime::Runtime::start(
+                config.cto.clone(),
+                config.data_dir.clone(),
+                lock.clone(),
+                global_pause.clone(),
+                health.clone(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let mut monitor_runtime = if config.monitor.enabled {
         Some(
             crate::monitor::Runtime::start(
@@ -586,6 +638,7 @@ async fn run_inner(
                     health.pulse(&health.root_tick_ms);
                     if let Some(history)=&history {history.record("coverage_tick",json!({"coverage":"observed_subset_unverified"}));}
                 },
+                _=async {match &mut cto_runtime {Some(runtime)=>runtime.completed().await,None=>std::future::pending().await}}=>supervision::red(&health,"cto"),
                 _=async {match &mut history_runtime {Some(runtime)=>runtime.completed().await,None=>std::future::pending().await}}=>supervision::red(&health,"history"),
                 _=async {
                     match &mut monitor_runtime {
@@ -627,6 +680,10 @@ async fn run_inner(
     );
     set_state(&health.transport_state, "stopped");
     set(&health.backoff_ms, 0);
+    let cto_result = match cto_runtime {
+        Some(runtime) => runtime.shutdown().await,
+        None => Ok(()),
+    };
     pipeline.history = None;
     let history_result = match history_runtime {
         Some(runtime) => runtime.shutdown().await,
@@ -695,6 +752,7 @@ async fn run_inner(
     if !server_done {
         set_state(&health.health_worker_state, "stopped");
     }
+    cto_result.map_err(str::to_string)?;
     result?;
     monitor_result?;
     history_result?;

@@ -24,7 +24,7 @@
 
 **Track the launch stream. Detect unusual volume. Deliver concise alerts with their coverage limits attached.**
 
-Onchain Crime Watcher is an open-source research project for the pump.fun ecosystem. It collects real events, evaluates volume anomalies, and can deliver alerts to an explicitly configured Discord staging channel. Community takeovers, bundle tracking, and wallet signals are part of the roadmap.
+Onchain Crime Watcher is an open-source research project for the pump.fun ecosystem. It collects real events, evaluates volume anomalies, and can deliver alerts to an explicitly configured Discord staging channel. Curated community-takeover listings have an independent opt-in polling/staging path. Bundle tracking and wallet signals remain on the roadmap.
 
 ## Project status
 
@@ -49,7 +49,7 @@ Production delivery remains off while provider coverage, billing, Discord accept
 | Hosting preparation | Offline preflight, Docker/systemd templates and checksummed stopped-process snapshots; nothing deployed. |
 | Local visibility | Loopback health endpoint, spend accounting, connection generations, and failure counters. |
 
-See the [hosting preparation guide](docs/hosting.md) and [history/watch runbook](docs/history.md). The wider CTO, bundle, wallet and secondary-feed features remain under development.
+See the [hosting preparation guide](docs/hosting.md) and [history/watch runbook](docs/history.md). See [CTO setup](docs/cto.md) for the independent curated-claim channel. Bundle, wallet, full backtesting and secondary-feed features remain under development.
 
 ## Quickstart
 

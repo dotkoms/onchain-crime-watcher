@@ -6,6 +6,19 @@ use std::sync::{
 
 #[derive(Default)]
 pub struct Health {
+    pub cto_enabled: AtomicU64,
+    pub cto_tick_ms: AtomicU64,
+    pub cto_last_success_ms: AtomicU64,
+    pub cto_polls: AtomicU64,
+    pub cto_errors: AtomicU64,
+    pub cto_suppressed: AtomicU64,
+    pub cto_unknown_dates: AtomicU64,
+    pub cto_observed: AtomicU64,
+    pub cto_sent: AtomicU64,
+    pub cto_unknown: AtomicU64,
+    pub cto_budget_dropped: AtomicU64,
+    pub cto_worker_state: Mutex<&'static str>,
+    pub cto_state: Mutex<&'static str>,
     pub frames: AtomicU64,
     pub trades: AtomicU64,
     pub creates: AtomicU64,
@@ -149,6 +162,11 @@ impl Health {
         }
         for (active, counter, label) in [
             (
+                value(&self.cto_enabled) > 0,
+                &self.cto_tick_ms,
+                "cto_stalled",
+            ),
+            (
                 state(&self.history_state) == "recording",
                 &self.history_tick_ms,
                 "history_stalled",
@@ -213,6 +231,11 @@ impl Health {
         {
             reasons.push("monitor_degraded");
         }
+        if value(&self.cto_enabled) > 0
+            && (state(&self.cto_worker_state) != "running" || state(&self.cto_state) != "ready")
+        {
+            reasons.push("cto_degraded");
+        }
         json!({"operational":reasons.is_empty(),"production_ready":false,"verification":"single-source, unverified","reasons":reasons})
     }
     pub(crate) fn feed_connected(&self) -> bool {
@@ -223,7 +246,7 @@ impl Health {
             )
     }
     pub fn snapshot(&self) -> Value {
-        json!({"version":env!("CARGO_PKG_VERSION"),"milestone":"M1c-preparation","signals_enabled":value(&self.delivery_enabled)>0,"production_signals_enabled":false,"chain_probe":{"state":state(&self.probe_state),"global_coverage_verified":false,"healing":state(&self.heal_state)},
+        json!({"version":env!("CARGO_PKG_VERSION"),"milestone":"M1c-preparation","cto":{"state":state(&self.cto_state),"worker":state(&self.cto_worker_state),"last_success_ms":value(&self.cto_last_success_ms),"polls":value(&self.cto_polls),"errors":value(&self.cto_errors),"suppressed_by_high_water":value(&self.cto_suppressed),"unknown_dates":value(&self.cto_unknown_dates),"observed":value(&self.cto_observed),"sent":value(&self.cto_sent),"unknown":value(&self.cto_unknown),"budget_dropped":value(&self.cto_budget_dropped),"meaning":"curated listing claim; ownership unverified"},"signals_enabled":value(&self.delivery_enabled)>0,"production_signals_enabled":false,"chain_probe":{"state":state(&self.probe_state),"global_coverage_verified":false,"healing":state(&self.heal_state)},
             "supervision":{"state":state(&self.supervisor_state),"pipeline":state(&self.pipeline_state),"capture":state(&self.capture_worker_state),"delivery":state(&self.delivery_worker_state),"health":state(&self.health_worker_state),"pipeline_panics":value(&self.pipeline_panics),"pipeline_restarts":value(&self.pipeline_restarts),"failed_stages":value(&self.worker_failures)},
             "feed":{"state":state(&self.feed_state),"verification":"single-source, unverified","generation":value(&self.generation),"frames":value(&self.frames),"trades":value(&self.trades),"creates":value(&self.creates),"migrations":value(&self.migrations),"duplicates":value(&self.duplicates),"unresolved":value(&self.unresolved),"decode_errors":value(&self.decode_errors),"unusable_reserves":value(&self.unusable_reserves),"last_frame_ms":value(&self.last_frame_ms)},
             "recovery":{"reconnects":value(&self.reconnects),"exhausted":value(&self.recovery_exhausted),"backoff_ms":value(&self.backoff_ms),"last_failure":state(&self.last_failure)},

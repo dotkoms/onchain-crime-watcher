@@ -70,7 +70,7 @@ checkpoint/delta storage, saturation measurements and real acceptance remain pen
 - [x] Heartbeat, readiness and external dead-man monitoring (implementation; real external notification acceptance pending).
 - [ ] Independent probes, bounded gap healing, durable coverage/checkpoints and remaining supervision.
 - [ ] Complete recorded subscription/delivery replay and backtest evidence workflow.
-- [ ] CTO polling, persistence, dedup and staging alerts.
+- [x] CTO polling, persistence, dedup and staging alerts (real source/channel acceptance deferred).
 - [ ] Launch bundle storage, funding analysis, sale tracking and partial coverage.
 - [ ] Wallet cost basis, weekly ranking, watch matching and observed-position exits.
 - [ ] Hosting/secrets/persistence/backup/rollback preparation (no actual deployment).
@@ -114,3 +114,12 @@ Recorded analysis execution increment:
 - [ ] Multi-segment/checkpoint replay and real historical train/test threshold evaluation.
 
 See [analysis replay](../docs/analysis-replay.md); this is not a complete delivery backtest.
+
+CTO implementation:
+
+- [x] Bounded Solana polling and strict optional claim-date handling.
+- [x] Restart priming, persisted high-water, bounded tombstones and conservative send intents.
+- [x] Dedicated verified staging channel, rolling budgets and ambiguous-outcome suppression.
+- [x] Independent worker health, trade-failure isolation and checked shutdown.
+- [x] Accurate claim wording and unavailable bundle/price history.
+- [ ] Real DexScreener/Discord acceptance after explicit live authorization.

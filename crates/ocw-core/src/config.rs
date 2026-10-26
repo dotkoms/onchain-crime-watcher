@@ -15,6 +15,7 @@ pub struct Config {
     pub history: HistoryConfig,
     pub watch: crate::watch::Config,
     pub probe: crate::probe::Config,
+    pub cto: crate::cto::Config,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -108,6 +109,7 @@ impl Default for Config {
             history: HistoryConfig::default(),
             watch: crate::watch::Config::default(),
             probe: crate::probe::Config::default(),
+            cto: crate::cto::Config::default(),
         }
     }
 }
@@ -170,6 +172,18 @@ impl Config {
         }
         if self.probe.heal_enabled && (!self.probe.enabled || !self.history.enabled) {
             return Err("healing requires enabled independent probing and durable history".into());
+        }
+        self.cto.validate().map_err(str::to_string)?;
+        if self.cto.staging_delivery
+            && [
+                self.delivery.staging_channel_id.as_ref(),
+                self.monitor.status_channel_id.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|id| Some(id) == self.cto.channel_id.as_ref())
+        {
+            return Err("CTO staging requires a distinct channel".into());
         }
         self.probe.validate().map_err(str::to_string)?;
         self.watch.validate().map_err(str::to_string)?;

@@ -2,7 +2,7 @@
 
 The repository provides an offline preflight, Docker image/Compose template, systemd unit and
 checksummed offline snapshots. These run the implemented collector and staging-volume path.
-CTO alerts, bundle tracking, wallet rankings, full decision backtesting and independent
+Bundle tracking, wallet rankings, full decision backtesting and independent
 secondary-feed switching remain unfinished. Adding keys does not enable those missing features.
 
 ## Supply fresh inputs
@@ -17,6 +17,7 @@ runtime directory. Never place secrets in TOML, command arguments or version con
 | `OCW_PUMPPORTAL_KEY` | Explicit paid observation: one configured mint or `feed.auto_watch=true`. |
 | `OCW_DISCORD_STAGING_URL` and `delivery.staging_channel_id` | Explicit staging signal delivery; channel identity is verified at live startup. |
 | `OCW_DISCORD_STATUS_URL` and `monitor.status_channel_id` | Optional Discord status card; use a separate webhook from staging. |
+| `OCW_DISCORD_CTO_URL` and `cto.channel_id` | Optional dedicated CTO staging delivery; see [CTO setup](cto.md). |
 | `SOLANA_RPC_URL` | `probe.enabled=true`; use a provider independent from the primary stream. |
 | `OCW_DEADMAN_URL` | `monitor.deadman=true`; independently configure Healthchecks period/grace and notifications. |
 
@@ -72,7 +73,7 @@ Live hosted operation remains untested.
 Use a dedicated `ocw` account, `/etc/ocw/config.toml`, root-owned mode-0600
 `/etc/ocw/ocw.env` and versioned binaries under `/opt/ocw/releases/<commit>/ocw`.
 `/opt/ocw/current` selects the active release. The unit creates private `/var/lib/ocw`, runs the
-offline preflight before free collection, bounds restart frequency and allows 30 seconds for
+offline preflight before free collection, bounds restart frequency and allows 45 seconds for
 shutdown. Both SIGINT and SIGTERM request checked collector shutdown. Add any paid/staging flags
 to both `ExecStartPre` and `ExecStart` when selecting those modes.
 

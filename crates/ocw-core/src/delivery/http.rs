@@ -7,7 +7,7 @@ use std::{
 };
 use url::Url;
 
-pub(super) enum Outcome {
+pub(crate) enum Outcome {
     Sent(String),
     RateLimited,
     Rejected,
@@ -15,11 +15,11 @@ pub(super) enum Outcome {
     Unknown,
     WrongTarget,
 }
-pub(super) struct Report {
+pub(crate) struct Report {
     pub outcome: Outcome,
     pub pause: Duration,
 }
-pub(super) struct Http {
+pub(crate) struct Http {
     client: reqwest::Client,
     url: Url,
     channel: String,

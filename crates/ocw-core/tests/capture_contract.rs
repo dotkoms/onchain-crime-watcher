@@ -64,6 +64,14 @@ fn torn_tail_recovery_preserves_every_prior_record() {
     assert!(recover_segment(&path).unwrap() > 0);
     assert_eq!(std::fs::metadata(&path).unwrap().len(), good);
     assert_eq!(read_segment(&path).unwrap().records.len(), 1);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path.with_extension("json")).unwrap()).unwrap();
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        manifest["sha256"],
+        format!("{:x}", Sha256::digest(std::fs::read(&path).unwrap()))
+    );
+    assert_eq!(manifest["recovered"], true);
 }
 
 #[tokio::test]
@@ -110,4 +118,22 @@ async fn recorder_stops_at_cap_and_does_not_delete_unowned_files() {
         std::fs::read(root.join("keep.txt")).unwrap(),
         b"operator file"
     );
+}
+
+#[test]
+fn decompression_is_bounded_even_with_a_valid_checksum() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bomb.ocwcap");
+    let compressed = zstd::bulk::compress(&vec![0; 100_000], 3).unwrap();
+    let mut file = b"OCWC\x01".to_vec();
+    file.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+    file.extend_from_slice(&Sha256::digest(&compressed));
+    file.extend(compressed);
+    std::fs::write(&path, file).unwrap();
+    let err = match read_segment(&path) {
+        Ok(_) => panic!("oversized record accepted"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("size"));
 }

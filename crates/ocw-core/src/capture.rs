@@ -175,17 +175,50 @@ pub fn recover_segment(path: &Path) -> io::Result<u64> {
     let lost = file.metadata()?.len() - valid;
     file.set_len(valid)?;
     file.sync_all()?;
+    let mut records = 0u64;
+    let mut first_seq = 0;
+    let mut last_seq = 0;
+    scan(path, |record| {
+        if records == 0 {
+            first_seq = record.seq;
+        }
+        last_seq = record.seq;
+        records += 1;
+        Ok(())
+    })?;
+    let mut input = File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let size = input.read(&mut buffer)?;
+        if size == 0 {
+            break;
+        }
+        hash.update(&buffer[..size]);
+    }
+    let manifest = serde_json::json!({
+        "schema": 1, "replay_mode": "decoder-only", "closed": true,
+        "recovered": true, "recovered_tail_bytes": lost,
+        "records": records, "first_seq": first_seq, "last_seq": last_seq,
+        "bytes": valid, "sha256": format!("{:x}", hash.finalize())
+    });
+    atomic_write(
+        &path.with_extension("json"),
+        &serde_json::to_vec(&manifest)?,
+    )?;
     Ok(lost)
 }
 /// The visitor API keeps recovery and whole-file inspection bounded even for large captures.
-pub fn scan(
-    path: &Path,
-    mut visit: impl FnMut(Record) -> io::Result<()>,
-) -> io::Result<(u64, bool)> {
+pub fn scan(path: &Path, visit: impl FnMut(Record) -> io::Result<()>) -> io::Result<(u64, bool)> {
     if path.is_symlink() {
         return Err(io::Error::other("capture cannot be a symlink"));
     }
-    let mut file = File::open(path)?;
+    scan_reader(File::open(path)?, visit)
+}
+fn scan_reader(
+    mut file: impl Read,
+    mut visit: impl FnMut(Record) -> io::Result<()>,
+) -> io::Result<(u64, bool)> {
     let mut magic = [0u8; 5];
     file.read_exact(&mut magic)?;
     if &magic != MAGIC {
@@ -198,7 +231,7 @@ pub fn scan(
         if n == 0 {
             return Ok((valid, false));
         }
-        if file.read_exact(&mut len[1..]).is_err() {
+        if !read_tail(&mut file, &mut len[1..])? {
             return Ok((valid, true));
         }
         let len = u32::from_le_bytes(len) as usize;
@@ -207,7 +240,7 @@ pub fn scan(
         }
         let mut checksum = [0u8; 32];
         let mut compressed = vec![0u8; len];
-        if file.read_exact(&mut checksum).is_err() || file.read_exact(&mut compressed).is_err() {
+        if !read_tail(&mut file, &mut checksum)? || !read_tail(&mut file, &mut compressed)? {
             return Ok((valid, true));
         }
         if Sha256::digest(&compressed).as_slice() != checksum {
@@ -241,6 +274,14 @@ pub fn scan(
     }
 }
 
+fn read_tail(reader: &mut impl Read, bytes: &mut [u8]) -> io::Result<bool> {
+    match reader.read_exact(bytes) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 pub struct Tap {
     sender: mpsc::Sender<Record>,
     health: Arc<Health>,
@@ -259,10 +300,10 @@ pub fn channel(capacity: usize, health: Arc<Health>) -> (Tap, mpsc::Receiver<Rec
 }
 impl Tap {
     pub fn record(&mut self, record: Record) {
-        if let Some(gap) = self.gap.take() {
-            if let Err(err) = self.sender.try_send(gap) {
-                self.gap = Some(err.into_inner());
-            }
+        if let Some(gap) = self.gap.take()
+            && let Err(err) = self.sender.try_send(gap)
+        {
+            self.gap = Some(err.into_inner());
         }
         if self.gap.is_none() && self.sender.try_send(record.clone()).is_ok() {
             return;
@@ -358,6 +399,7 @@ pub fn spawn(
 ) -> (Tap, tokio::task::JoinHandle<()>) {
     let (tap, mut rx) = channel(cfg.queue_capacity, health.clone());
     let task = tokio::task::spawn_blocking(move || {
+        let mut in_progress = false;
         let result = (|| -> io::Result<()> {
             // A pre-existing capture directory may contain operator files; never chmod or delete them.
             if !root.exists() {
@@ -392,11 +434,11 @@ pub fn spawn(
                     }
                     Err(mpsc::error::TryRecvError::Disconnected) => break,
                 };
+                in_progress = true;
                 if record.boot_id.is_empty()
                     || record.boot_id.len() > 64
                     || !record.boot_id.bytes().all(|b| b.is_ascii_alphanumeric())
                 {
-                    inc(&health.capture_dropped);
                     return Err(io::Error::other("invalid capture boot identity"));
                 }
                 let day = record.wall_ms / 86_400_000;
@@ -438,6 +480,7 @@ pub fn spawn(
                 total += bytes;
                 set(&health.capture_bytes, total);
                 inc(&health.capture_written);
+                in_progress = false;
                 if last_sync.elapsed() >= Duration::from_secs(1) {
                     if let Some((_, _, path, segment)) = &mut current {
                         segment.manifest(path, false, &health)?;
@@ -457,6 +500,9 @@ pub fn spawn(
             Ok(())
         })();
         if result.is_err() {
+            if in_progress {
+                inc(&health.capture_dropped);
+            }
             while rx.try_recv().is_ok() {
                 inc(&health.capture_dropped);
             }
@@ -464,4 +510,34 @@ pub fn spawn(
         }
     });
     (tap, task)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_real_io_error_is_not_a_torn_tail_that_recovery_may_truncate() {
+        struct Broken {
+            prefix: std::io::Cursor<Vec<u8>>,
+        }
+        impl Read for Broken {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.prefix.position() as usize >= self.prefix.get_ref().len() {
+                    return Err(io::Error::other("simulated disk read failure"));
+                }
+                self.prefix.read(buf)
+            }
+        }
+        let mut prefix = MAGIC.to_vec();
+        prefix.push(1);
+        assert!(
+            scan_reader(
+                Broken {
+                    prefix: std::io::Cursor::new(prefix)
+                },
+                |_| Ok(())
+            )
+            .is_err()
+        );
+    }
 }

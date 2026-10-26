@@ -53,7 +53,7 @@ pub fn units(s: &str, scale: u32) -> Option<u64> {
     let raw = if power >= 0 {
         value.checked_mul(factor)?
     } else {
-        if value % factor != 0 {
+        if !value.is_multiple_of(factor) {
             return None;
         }
         value / factor
@@ -105,6 +105,7 @@ pub struct Decoder {
     reserves: HashMap<[u8; 32], u64>,
     capacity: usize,
     window: u64,
+    unusable_reserves: u64,
 }
 impl Decoder {
     pub fn new(capacity: usize, window: u64) -> Self {
@@ -114,6 +115,7 @@ impl Decoder {
             reserves: HashMap::new(),
             capacity: capacity.max(1),
             window,
+            unusable_reserves: 0,
         }
     }
     pub fn reset_session(&mut self) {
@@ -121,6 +123,9 @@ impl Decoder {
     }
     pub fn dedup_len(&self) -> usize {
         self.seen.len()
+    }
+    pub fn unusable_reserves(&self) -> u64 {
+        self.unusable_reserves
     }
     pub fn decode(&mut self, bytes: &[u8], now: u64) -> Result<Event, String> {
         let v: Value = serde_json::from_slice(bytes).map_err(|_| "invalid JSON")?;
@@ -133,7 +138,15 @@ impl Decoder {
             self.reserves.remove(&mint);
             return Ok(Event::Migration(mint));
         }
-        let reserve = number(&v, "vSolInBondingCurve", 9)?;
+        // Observed create payloads can contain fractional-lamport float noise. An unusable
+        // optional reserve does not invalidate token creation or a separately resolved SOL leg.
+        let reserve = match number(&v, "vSolInBondingCurve", 9) {
+            Ok(reserve) => reserve,
+            Err(_) => {
+                self.unusable_reserves += 1;
+                None
+            }
+        };
         if kind == "create" {
             self.set_reserve(mint, reserve);
             return Ok(Event::Create(mint));
@@ -179,10 +192,10 @@ impl Decoder {
             ),
         };
         self.set_reserve(mint, reserve);
-        if self.seen.len() == self.capacity {
-            if let Some((id, _)) = self.order.pop_front() {
-                self.seen.remove(&id);
-            }
+        if self.seen.len() == self.capacity
+            && let Some((id, _)) = self.order.pop_front()
+        {
+            self.seen.remove(&id);
         }
         self.seen.insert(identity.clone(), now);
         self.order.push_back((identity, now));

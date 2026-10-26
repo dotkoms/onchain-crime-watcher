@@ -13,6 +13,7 @@ pub struct Health {
     pub duplicates: AtomicU64,
     pub unresolved: AtomicU64,
     pub decode_errors: AtomicU64,
+    pub unusable_reserves: AtomicU64,
     pub capture_written: AtomicU64,
     pub capture_dropped: AtomicU64,
     pub capture_bytes: AtomicU64,
@@ -48,9 +49,29 @@ pub fn set_state(lock: &Mutex<&'static str>, s: &'static str) {
 impl Health {
     pub fn snapshot(&self) -> Value {
         json!({"version":env!("CARGO_PKG_VERSION"),"milestone":"M1a","signals_enabled":false,
-            "feed":{"state":state(&self.feed_state),"verification":"single-source, unverified","generation":value(&self.generation),"frames":value(&self.frames),"trades":value(&self.trades),"creates":value(&self.creates),"migrations":value(&self.migrations),"duplicates":value(&self.duplicates),"unresolved":value(&self.unresolved),"decode_errors":value(&self.decode_errors),"last_frame_ms":value(&self.last_frame_ms)},
+            "feed":{"state":state(&self.feed_state),"verification":"single-source, unverified","generation":value(&self.generation),"frames":value(&self.frames),"trades":value(&self.trades),"creates":value(&self.creates),"migrations":value(&self.migrations),"duplicates":value(&self.duplicates),"unresolved":value(&self.unresolved),"decode_errors":value(&self.decode_errors),"unusable_reserves":value(&self.unusable_reserves),"last_frame_ms":value(&self.last_frame_ms)},
             "capture":{"state":state(&self.capture_state),"written_records":value(&self.capture_written),"dropped_records":value(&self.capture_dropped),"bytes":value(&self.capture_bytes),"recovered_bytes":value(&self.capture_recovered),"replay_mode":"decoder-only"},
             "paid":{"state":state(&self.paid_state),"billable_received":value(&self.billable_received),"reserved_messages":value(&self.budget_reserved),"stops":value(&self.budget_stops),"hard_provider_cap":false},
             "outage":{"sent":value(&self.outage_sent),"unknown_or_failed":value(&self.outage_unknown)}})
     }
+}
+
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    health: std::sync::Arc<Health>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    if !listener.local_addr()?.ip().is_loopback() {
+        return Err(std::io::Error::other("health listener must be loopback"));
+    }
+    let app = axum::Router::new().route(
+        "/health",
+        axum::routing::get(move || {
+            let health = health.clone();
+            async move { axum::Json(health.snapshot()) }
+        }),
+    );
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
 }

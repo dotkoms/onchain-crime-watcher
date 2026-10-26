@@ -91,3 +91,31 @@ fn corrupt_ledger_fails_closed() {
     std::fs::write(&path, b"{\"reserved\":0}").unwrap();
     assert!(Ledger::open(&path, 10, 20, 2, 3).is_err());
 }
+
+#[test]
+fn a_second_collector_cannot_share_the_data_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let first = ocw_core::storage::ProcessLock::acquire(&data).unwrap();
+    assert!(ocw_core::storage::ProcessLock::acquire(&data).is_err());
+    drop(first);
+    assert!(ocw_core::storage::ProcessLock::acquire(&data).is_ok());
+}
+
+#[test]
+fn observed_create_with_noisy_optional_reserves_is_still_a_create() {
+    let mut decoder = Decoder::new(8, 180_000);
+    let mut creates = 0;
+    for (i, line) in include_str!("../../../tests/fixtures/pumpportal-create-observed.jsonl")
+        .lines()
+        .enumerate()
+    {
+        match decoder.decode(line.as_bytes(), i as u64).unwrap() {
+            Event::Create(_) => creates += 1,
+            Event::Other => {}
+            event => panic!("unexpected event {event:?}"),
+        }
+    }
+    assert_eq!(creates, 2);
+    assert_eq!(decoder.unusable_reserves(), 1);
+}

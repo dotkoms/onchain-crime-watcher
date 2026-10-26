@@ -64,3 +64,17 @@ probing/heal and real external acceptance remain pending.
 
 Full JoinSet topology, automatic disk/delivery rebuild, heartbeat/dead-man reporting, probes/heal,
 checkpoint/delta storage, saturation measurements and real acceptance remain pending.
+
+## Requested completion sequence (no deployment)
+
+- [x] Heartbeat, readiness and external dead-man monitoring (implementation; real external notification acceptance pending).
+- [ ] Independent probes, bounded gap healing, durable coverage/checkpoints and remaining supervision.
+- [ ] Complete recorded subscription/delivery replay and backtest evidence workflow.
+- [ ] CTO polling, persistence, dedup and staging alerts.
+- [ ] Launch bundle storage, funding analysis, sale tracking and partial coverage.
+- [ ] Wallet cost basis, weekly ranking, watch matching and observed-position exits.
+- [ ] Hosting/secrets/persistence/backup/rollback preparation (no actual deployment).
+- [ ] Independent secondary feed, warm authority switching and no merged signal histories.
+
+Live accounts, credentials, real historical capture collection and empirical acceptance are
+separate from implementation and are not marked complete by local tests.

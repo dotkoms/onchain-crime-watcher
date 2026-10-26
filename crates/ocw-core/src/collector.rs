@@ -278,6 +278,9 @@ async fn run_inner(
     {
         return Err("paid mode requires feed.mint, OCW_PUMPPORTAL_KEY, and live mode".into());
     }
+    if options.fixture.is_some() && config.monitor.enabled {
+        return Err("monitoring requires explicit live collection".into());
+    }
     let lock = Arc::new(
         ProcessLock::acquire(&config.data_dir)
             .map_err(|_| "cannot acquire private data directory/collector lock")?,
@@ -311,6 +314,39 @@ async fn run_inner(
     let global_pause = Arc::new(Pause::default());
     let boot = format!("{:x}{:x}", wall_ms(), std::process::id());
     let origin = Instant::now();
+    let _ = health.monitor_origin.set(origin);
+    health.pulse(&health.root_tick_ms);
+    set(&health.monitor_stall_ms, config.monitor.stall_ms);
+    set(&health.monitor_enabled, u64::from(config.monitor.enabled));
+    set(
+        &health.heartbeat_discord_enabled,
+        u64::from(config.monitor.discord_status),
+    );
+    set(&health.deadman_enabled, u64::from(config.monitor.deadman));
+    set_state(
+        &health.monitor_worker_state,
+        if config.monitor.enabled {
+            "starting"
+        } else {
+            "disabled"
+        },
+    );
+    let mut monitor_runtime = if config.monitor.enabled {
+        Some(
+            crate::monitor::Runtime::start(
+                config.monitor.clone(),
+                secrets.webhook.as_deref(),
+                &config.data_dir,
+                health.clone(),
+                global_pause.clone(),
+                lock.clone(),
+                boot.clone(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let mut delivery_runtime = if options.staging_delivery {
         Some(
             delivery::Runtime::start(
@@ -387,12 +423,21 @@ async fn run_inner(
         retry: crate::recovery::RetryPolicy::new(&config.recovery, wall_ms()),
     };
     let mut writer_outcome = None;
+    let mut scheduler_tick = tokio::time::interval(Duration::from_secs(1));
+    scheduler_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let (result, server_done) = {
         let operation = supervised::run(&mut pipeline, &mut source, &config, options.paid);
         tokio::pin!(operation, shutdown, timer);
         loop {
             tokio::select! {
                 result=&mut operation=>break (result,false),
+                _=scheduler_tick.tick()=>health.pulse(&health.root_tick_ms),
+                _=async {
+                    match &mut monitor_runtime {
+                        Some(runtime)=>runtime.completed().await,
+                        None=>std::future::pending().await,
+                    }
+                }=>supervision::red(&health,"monitor"),
                 _=&mut shutdown=>break (Ok(()),false),
                 _=&mut timer=>break (Ok(()),false),
                 _=&mut server=>{
@@ -427,6 +472,10 @@ async fn run_inner(
     );
     set_state(&health.transport_state, "stopped");
     set(&health.backoff_ms, 0);
+    let monitor_result = match monitor_runtime {
+        Some(runtime) => runtime.shutdown().await,
+        None => Ok(()),
+    };
     let delivery_result = match delivery_runtime {
         Some(sender) => sender.shutdown().await,
         None => Ok(()),
@@ -487,6 +536,7 @@ async fn run_inner(
         set_state(&health.health_worker_state, "stopped");
     }
     result?;
+    monitor_result?;
     capture_result?;
     delivery_result?;
     if health.snapshot()["supervision"]["state"] == "red" {

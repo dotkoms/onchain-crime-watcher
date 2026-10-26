@@ -13,3 +13,5 @@ pub mod spend;
 pub mod storage;
 pub mod supervision;
 pub mod volume;
+
+pub mod monitor;

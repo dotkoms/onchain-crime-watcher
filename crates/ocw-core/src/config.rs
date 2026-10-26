@@ -11,6 +11,7 @@ pub struct Config {
     pub capture: CaptureConfig,
     pub delivery: DeliveryConfig,
     pub recovery: RecoveryConfig,
+    pub monitor: MonitorConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -99,6 +100,7 @@ impl Default for Config {
             capture: CaptureConfig::default(),
             delivery: DeliveryConfig::default(),
             recovery: RecoveryConfig::default(),
+            monitor: MonitorConfig::default(),
         }
     }
 }
@@ -142,6 +144,19 @@ impl Config {
         Ok(config)
     }
     pub fn validate(&self) -> Result<(), String> {
+        let m = &self.monitor;
+        if !(60..=900).contains(&m.heartbeat_s)
+            || !(30..=300).contains(&m.deadman_s)
+            || !(3000..=30_000).contains(&m.stall_ms)
+            || !(100..=2000).contains(&m.timeout_ms)
+            || (m.discord_status
+                && m.status_channel_id
+                    .as_ref()
+                    .is_none_or(|id| id.parse::<u64>().ok().filter(|n| *n > 0).is_none()))
+            || (!m.enabled && (m.discord_status || m.deadman))
+        {
+            return Err("monitor limits or status channel are invalid".into());
+        }
         let f = &self.feed;
         let c = &self.capture;
         let g = &self.gate;
@@ -203,5 +218,32 @@ impl Config {
             return Err("capture limits are out of range".into());
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MonitorConfig {
+    pub enabled: bool,
+    pub discord_status: bool,
+    pub deadman: bool,
+    pub status_channel_id: Option<String>,
+    pub heartbeat_s: u64,
+    pub deadman_s: u64,
+    pub stall_ms: u64,
+    pub timeout_ms: u64,
+}
+impl Default for MonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            discord_status: false,
+            deadman: false,
+            status_channel_id: None,
+            heartbeat_s: 300,
+            deadman_s: 60,
+            stall_ms: 5000,
+            timeout_ms: 2000,
+        }
     }
 }

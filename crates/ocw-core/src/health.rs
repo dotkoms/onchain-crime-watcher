@@ -75,6 +75,19 @@ pub struct Health {
     pub pipeline_panics: AtomicU64,
     pub pipeline_restarts: AtomicU64,
     pub worker_failures: AtomicU64,
+    pub monitor_origin: std::sync::OnceLock<std::time::Instant>,
+    pub root_tick_ms: AtomicU64,
+    pub pipeline_tick_ms: AtomicU64,
+    pub monitor_stall_ms: AtomicU64,
+    pub monitor_enabled: AtomicU64,
+    pub heartbeat_discord_enabled: AtomicU64,
+    pub deadman_enabled: AtomicU64,
+    pub monitor_worker_state: Mutex<&'static str>,
+    pub heartbeat_updates: AtomicU64,
+    pub heartbeat_errors: AtomicU64,
+    pub deadman_pings: AtomicU64,
+    pub deadman_failures: AtomicU64,
+    pub deadman_errors: AtomicU64,
 }
 pub fn inc(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
@@ -94,6 +107,65 @@ pub fn set_state(lock: &Mutex<&'static str>, s: &'static str) {
     }
 }
 impl Health {
+    pub fn pulse(&self, counter: &AtomicU64) {
+        let origin = self.monitor_origin.get_or_init(std::time::Instant::now);
+        set(
+            counter,
+            u64::try_from(origin.elapsed().as_millis())
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        );
+    }
+    pub fn operational(&self) -> Value {
+        let now = self.monitor_origin.get().map(|at| {
+            u64::try_from(at.elapsed().as_millis())
+                .unwrap_or(u64::MAX)
+                .saturating_add(1)
+        });
+        self.operational_at(now)
+    }
+    pub(crate) fn operational_at(&self, now: Option<u64>) -> Value {
+        let mut reasons = Vec::new();
+        let limit = value(&self.monitor_stall_ms).max(3000);
+        for (counter, label) in [
+            (&self.root_tick_ms, "collector_stalled"),
+            (&self.pipeline_tick_ms, "pipeline_stalled"),
+        ] {
+            let tick = value(counter);
+            if now.is_none_or(|now| tick == 0 || tick > now || now - tick >= limit) {
+                reasons.push(label);
+            }
+        }
+        if state(&self.feed_state) != "connected" {
+            reasons.push("feed_unavailable");
+        }
+        if !matches!(
+            state(&self.application_state),
+            "observed" | "quiet_confirmed"
+        ) {
+            reasons.push("application_unverified");
+        }
+        if state(&self.supervisor_state) == "red" {
+            reasons.push("stage_red");
+        }
+        if matches!(
+            state(&self.capture_state),
+            "error" | "stopped_cap" | "stopped_disk"
+        ) {
+            reasons.push("capture_degraded");
+        }
+        if value(&self.delivery_enabled) > 0
+            && !matches!(state(&self.delivery_state), "ready" | "waiting_for_feed")
+        {
+            reasons.push("delivery_unavailable");
+        }
+        if value(&self.monitor_enabled) > 0
+            && !matches!(state(&self.monitor_worker_state), "running" | "starting")
+        {
+            reasons.push("monitor_degraded");
+        }
+        json!({"operational":reasons.is_empty(),"production_ready":false,"verification":"single-source, unverified","reasons":reasons})
+    }
     pub(crate) fn feed_connected(&self) -> bool {
         state(&self.feed_state) == "connected"
             && !matches!(
@@ -112,6 +184,7 @@ impl Health {
             "paid":{"state":state(&self.paid_state),"billable_received":value(&self.billable_received),"reserved_messages":value(&self.budget_reserved),"stops":value(&self.budget_stops),"hard_provider_cap":false},
             "volume":{"preview_enabled":value(&self.volume_enabled)>0,"active_mints":value(&self.volume_active),"evaluated_buckets":value(&self.volume_evaluated),"warmup_buckets":value(&self.volume_warmup),"fire_candidates":value(&self.volume_fire),"near_candidates":value(&self.volume_near),"unknown_mint_trades":value(&self.volume_unknown),"registry_full":value(&self.volume_full),"invalid_buckets":value(&self.volume_invalid),"delivery":if value(&self.delivery_enabled)>0 {"staging"}else{"disabled"}},
             "staging_delivery":{"enabled":value(&self.delivery_enabled)>0,"state":if value(&self.delivery_enabled)==0 {"disabled"}else{state(&self.delivery_state)},"queued":value(&self.delivery_queued),"dropped":value(&self.delivery_dropped),"expired_or_generation_changed":value(&self.delivery_expired),"budget_suppressed":value(&self.delivery_budget),"duplicates":value(&self.delivery_duplicates),"attempted":value(&self.delivery_attempted),"sent":value(&self.delivery_sent),"unknown":value(&self.delivery_unknown),"rejected":value(&self.delivery_rejected),"rate_limited":value(&self.delivery_limited)},
+            "monitor":{"enabled":value(&self.monitor_enabled)>0,"discord_status_configured":value(&self.heartbeat_discord_enabled)>0,"external_deadman_configured":value(&self.deadman_enabled)>0,"state":state(&self.monitor_worker_state),"heartbeat_updates":value(&self.heartbeat_updates),"heartbeat_errors":value(&self.heartbeat_errors),"deadman_pings":value(&self.deadman_pings),"deadman_failure_signals":value(&self.deadman_failures),"deadman_errors":value(&self.deadman_errors)},
             "outage":{"sent":value(&self.outage_sent),"unknown_or_failed":value(&self.outage_unknown)}})
     }
 }
@@ -124,13 +197,30 @@ pub async fn serve(
     if !listener.local_addr()?.ip().is_loopback() {
         return Err(std::io::Error::other("health listener must be loopback"));
     }
-    let app = axum::Router::new().route(
-        "/health",
-        axum::routing::get(move || {
-            let health = health.clone();
-            async move { axum::Json(health.snapshot()) }
-        }),
-    );
+    let ready_health = health.clone();
+    let app = axum::Router::new()
+        .route(
+            "/ready",
+            axum::routing::get(move || {
+                let health = ready_health.clone();
+                async move {
+                    let report = health.operational();
+                    let status = if report["operational"] == true {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    };
+                    (status, axum::Json(report))
+                }
+            }),
+        )
+        .route(
+            "/health",
+            axum::routing::get(move || {
+                let health = health.clone();
+                async move { axum::Json(health.snapshot()) }
+            }),
+        );
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await

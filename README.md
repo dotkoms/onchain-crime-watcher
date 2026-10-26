@@ -126,7 +126,7 @@ Receive time anchors observation. Unknown amounts stay unresolved, capture loss 
 | Area | Where it stands |
 | --- | --- |
 | Collector, volume core, staging sender | Implemented; live provider and Discord acceptance remain pending. |
-| Reliability | Bounded transport recovery and current-stage crash containment implemented. Independent probes, gap healing, full task topology, and heartbeat/checkpoint work remain. |
+| Reliability | Transport recovery, current-stage crash containment, heartbeat/readiness and opt-in external monitoring implemented. Independent probes, gap healing, full task topology and checkpoint work remain. |
 | Replay and validation | Diagnostic capture inspection exists. Complete decision replay, backtests, and production evidence gates remain. |
 | Community takeovers and bundles | Planned. Feed claims and incomplete launch coverage must be stated explicitly. |
 | Wallet discovery and exits | Planned. Requires observed positions, cost basis, and coverage-aware accounting. |
@@ -142,7 +142,7 @@ The full signal definitions and limits live in [SCOPE.md](SCOPE.md). The [backte
 | [Collector setup](docs/m1a.md) | [Feed and coverage](docs/feed.md) |
 | [Staging delivery](docs/staging-delivery.md) | [Delivery contract](docs/delivery.md) |
 | [Recovery](docs/recovery.md) · [Supervision](docs/supervision.md) · [Shutdown](docs/shutdown.md) | [Replay and backtesting](docs/backtest.md) |
-| [Quality constraints](CONSTRAINTS.md) | [Failover plan](docs/failover.md) |
+| [Monitoring setup](docs/monitoring.md) · [Quality constraints](CONSTRAINTS.md) | [Failover plan](docs/failover.md) |
 | [Task list](tasks/todo.md) | [References](docs/references.md) |
 
 ## Contributing

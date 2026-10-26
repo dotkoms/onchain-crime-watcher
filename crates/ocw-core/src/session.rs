@@ -339,6 +339,7 @@ async fn one(
             _=tokio::time::sleep_until(expires),if budget.is_some()=>break End::Window,
             _=tick.tick()=>{
                 if observe_application(&mut app,pipeline,elapsed_ms(opened)) {healthy_since=Instant::now();}
+                pipeline.health.pulse(&pipeline.health.pipeline_tick_ms);
                 pipeline.tick_volume();
             },
             _=ping.tick()=>{

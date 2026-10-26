@@ -117,3 +117,29 @@ panic recovery/cold reset, paid opt-out and retry-credit continuity, red health 
 background worker observation, and cancellation cleanup. No new external integration or demo data.
 This is the current-stage containment slice; automatic disk-worker rebuild, full JoinSet topology,
 heartbeat/dead-man reporting and the remaining M1c contracts stay pending.
+
+## Requested completion sequence (2026-10-26)
+
+No deployment, live feed connection, paid data, real webhook send, or invented historical data.
+Implement and commit each completed capability separately; retain real acceptance/evidence gates.
+
+1. Heartbeat/monitoring: structured heartbeat, freshness/readiness, optional external dead-man
+   and a durable Discord status card. Prove stalls, unhealthy/failure pings, lost process semantics,
+   bounded I/O, redaction, ambiguous POST handling, and cancellation.
+2. Reliability: independent bounded RPC probes and gap inspection, persistent coverage/checkpoints,
+   and task recovery without paid resumption. Missing/ambiguous history stays partial.
+3. Replay/backtesting: same subscription/admission logic under recorded time; external-response
+   tapes, deterministic decision reports and train/test evidence. Never fabricate historical captures.
+4. CTO: bounded poller, persistent priming/high-water/dedup, curated-claim wording and safe delivery.
+5. Bundles: durable launch observations, bounded funding evidence, exact original-bag sale allocation,
+   partial/unknown coverage and price-qualified escalation.
+6. Wallets: ordered deltas/checkpoints, average-cost accounting, rolling-week ranking, watched
+   position entry/exit episodes and delivery pairing without invented opening inventory.
+7. Hosting preparation: validated secrets/configuration, container/systemd, persistence, backup/
+   restore and rollback tooling. Do not deploy anything or configure actual third-party accounts.
+8. Secondary feed: independent adapter and separate warm state, source capability/license checks,
+   one authority, bounded switching/flap guard and no combined/duplicate series.
+
+Each commit requires relevant fault tests plus formatting, locked Clippy/tests/build and audit.
+Provider compatibility, an external dead-man account, real Discord acceptance, historical capture
+collection, threshold validation and deployment remain explicit setup/evidence requirements.

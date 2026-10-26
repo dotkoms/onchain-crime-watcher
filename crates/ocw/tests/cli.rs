@@ -137,6 +137,7 @@ fn default_start_waits_for_real_data_without_credentials_network_or_disk_writes(
         .env("OCW_PUMPPORTAL_KEY", "invalid-on-purpose")
         .env("OCW_DISCORD_STATUS_URL", "invalid-on-purpose")
         .env("OCW_DISCORD_STAGING_URL", "invalid-on-purpose")
+        .env("OCW_DEADMAN_URL", "invalid-on-purpose")
         .output()
         .unwrap();
     assert!(

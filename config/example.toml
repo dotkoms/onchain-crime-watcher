@@ -43,3 +43,15 @@ healthy_reset_ms = 60000
 ping_interval_ms = 20000
 pong_timeout_ms = 10000
 transport_idle_ms = 60000
+
+# Structured heartbeat/readiness; no network reporting unless independently configured.
+[monitor]
+enabled = false
+discord_status = false
+# status_channel_id = "YOUR_PUBLIC_STATUS_CHANNEL_ID"
+deadman = false
+heartbeat_s = 300
+deadman_s = 60
+stall_ms = 5000
+timeout_ms = 2000
+# Secrets are environment-only: OCW_DISCORD_STATUS_URL and OCW_DEADMAN_URL.

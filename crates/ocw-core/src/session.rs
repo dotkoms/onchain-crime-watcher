@@ -103,6 +103,7 @@ pub(crate) async fn live(
     let mut paid = budget.is_some();
     loop {
         pipeline.decoder.reset_session();
+        pipeline.reset_volume();
         pipeline.generation += 1;
         set(&pipeline.health.generation, pipeline.generation);
         let end = one(
@@ -128,6 +129,7 @@ pub(crate) async fn live(
             return Ok(());
         }
         paid = false;
+        pipeline.reset_volume();
         pipeline.control(
             "paid_stream_stopped",
             serde_json::json!({"replacement":"free-only"}),
@@ -202,6 +204,8 @@ async fn one(
         Duration::from_secs(20),
     );
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut volume_tick = tokio::time::interval(Duration::from_secs(1));
+    volume_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let end = loop {
         if let Some(b) = &mut budget
             && !matches!(b.refill(pipeline).await, Ok(true))
@@ -209,6 +213,7 @@ async fn one(
             break End::Budget;
         }
         tokio::select! {
+            _=volume_tick.tick()=>pipeline.tick_volume(),
             frame=socket.next()=>{
                 last_receive=Instant::now();
                 match frame {

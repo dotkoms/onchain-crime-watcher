@@ -25,6 +25,15 @@ pub struct Health {
     pub last_frame_ms: AtomicU64,
     pub outage_sent: AtomicU64,
     pub outage_unknown: AtomicU64,
+    pub volume_enabled: AtomicU64,
+    pub volume_active: AtomicU64,
+    pub volume_evaluated: AtomicU64,
+    pub volume_warmup: AtomicU64,
+    pub volume_fire: AtomicU64,
+    pub volume_near: AtomicU64,
+    pub volume_unknown: AtomicU64,
+    pub volume_full: AtomicU64,
+    pub volume_invalid: AtomicU64,
     pub feed_state: Mutex<&'static str>,
     pub capture_state: Mutex<&'static str>,
     pub paid_state: Mutex<&'static str>,
@@ -52,6 +61,7 @@ impl Health {
             "feed":{"state":state(&self.feed_state),"verification":"single-source, unverified","generation":value(&self.generation),"frames":value(&self.frames),"trades":value(&self.trades),"creates":value(&self.creates),"migrations":value(&self.migrations),"duplicates":value(&self.duplicates),"unresolved":value(&self.unresolved),"decode_errors":value(&self.decode_errors),"unusable_reserves":value(&self.unusable_reserves),"last_frame_ms":value(&self.last_frame_ms)},
             "capture":{"state":state(&self.capture_state),"written_records":value(&self.capture_written),"dropped_records":value(&self.capture_dropped),"bytes":value(&self.capture_bytes),"recovered_bytes":value(&self.capture_recovered),"replay_mode":"decoder-only"},
             "paid":{"state":state(&self.paid_state),"billable_received":value(&self.billable_received),"reserved_messages":value(&self.budget_reserved),"stops":value(&self.budget_stops),"hard_provider_cap":false},
+            "volume":{"preview_enabled":value(&self.volume_enabled)>0,"active_mints":value(&self.volume_active),"evaluated_buckets":value(&self.volume_evaluated),"warmup_buckets":value(&self.volume_warmup),"fire_candidates":value(&self.volume_fire),"near_candidates":value(&self.volume_near),"unknown_mint_trades":value(&self.volume_unknown),"registry_full":value(&self.volume_full),"invalid_buckets":value(&self.volume_invalid),"delivery":"disabled"},
             "outage":{"sent":value(&self.outage_sent),"unknown_or_failed":value(&self.outage_unknown)}})
     }
 }

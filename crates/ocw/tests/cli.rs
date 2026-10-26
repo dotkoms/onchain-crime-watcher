@@ -101,3 +101,95 @@ fn invalid_config_never_echoes_values_and_initialization_never_overwrites() {
         assert_eq!(out.status.success(), expected);
     }
 }
+
+#[test]
+fn default_start_waits_for_real_data_without_credentials_network_or_disk_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ocw"))
+        .current_dir(dir.path())
+        .env("OCW_PUMPPORTAL_KEY", "invalid-on-purpose")
+        .env("OCW_DISCORD_STATUS_URL", "invalid-on-purpose")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let state: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(state["state"], "waiting_for_data");
+    assert_eq!(state["provider_connected"], false);
+    assert_eq!(state["trades"], 0);
+    assert_eq!(state["alerts_sent"], 0);
+    assert!(state["last_trade_ms"].is_null());
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("invalid-on-purpose"));
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn live_flags_require_explicit_live_and_reject_mixed_modes_before_side_effects() {
+    for args in [
+        vec!["--enable-paid"],
+        vec!["--run-for-secs", "1"],
+        vec!["--live", "--status"],
+        vec!["--status", "--enable-paid"],
+        vec!["--live", "--fixture", "missing.jsonl"],
+        vec!["--replay-capture", "missing.ocwcap", "--dry"],
+        vec!["--preview-volume"],
+        vec!["--demo"],
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_ocw"))
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn executable_replays_observed_frames_without_credentials_or_invented_signals() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("real.ocwcap");
+    let mut segment = ocw_core::capture::Segment::create(&path).unwrap();
+    for (i, line) in include_str!("../../../tests/fixtures/pumpportal-create-observed.jsonl")
+        .lines()
+        .enumerate()
+    {
+        segment
+            .append(&ocw_core::capture::Record::frame(
+                i as u64,
+                "observed",
+                1,
+                i as u64 * 1_000_000_000,
+                0,
+                line.as_bytes().to_vec().into(),
+            ))
+            .unwrap();
+    }
+    segment.sync().unwrap();
+    drop(segment);
+    let before = fs::read(&path).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ocw"))
+        .current_dir(dir.path())
+        .env("OCW_PUMPPORTAL_KEY", "invalid-on-purpose")
+        .env("OCW_DISCORD_STATUS_URL", "invalid-on-purpose")
+        .args(["--replay-capture", path.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(summary["frames"], 4);
+    assert_eq!(summary["creates"], 2);
+    assert_eq!(summary["trades"], 0);
+    assert_eq!(summary["volume"]["fire"], 0);
+    assert_eq!(summary["alerts_sent"], 0);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}

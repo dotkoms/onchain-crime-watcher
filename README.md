@@ -3,29 +3,44 @@
 A Discord alert bot for Solana meme tokens. Rust for the data path, latency as the design axis,
 built from scratch.
 
-**Status: M1a collector implemented on the implementation branch, with local tests and a free-stream
-probe. Paid-feed/reference and staging Discord acceptance remain pending credentials.
-Product contract: scope revision 6. Next: finish empirical M1a acceptance, then M1b staging signal.**
+**Status: M1a collector is on main. The app is prepared for real data, with live integration
+currently deferred. Default startup reports waiting for data; no demo trades or signals are
+supplied. Recorded captures and optional live volume previews use the same volume core.
+Product contract: scope revision 6. Live acceptance and Discord signal delivery remain pending.**
 
 The contract is [SCOPE.md](SCOPE.md). The review that reshaped it is [REVIEW.md](REVIEW.md), the
 public projects it was checked against are catalogued in [docs/references.md](docs/references.md),
 and the two new subsystems have their own specs: [docs/backtest.md](docs/backtest.md) and
 [docs/failover.md](docs/failover.md). This README is the readable plan.
 
-## Run the collector
+## Start disconnected
 
 Requires Rust 1.92+ on Linux/macOS. From the repository root:
 
 ```sh
 cargo test --workspace --locked
+cargo run --locked
+cargo run --locked -- --config config/example.toml --check-config
+```
+
+Starting without arguments prints waiting-for-data status and exits. It does not read credentials,
+connect to a provider, invent data, or create storage. See [the real-data runbook](docs/real-data.md)
+for recorded-capture inspection and the connection steps for later.
+
+## Connect later
+
+Networking requires explicit --live, and paid subscriptions additionally require --enable-paid:
+
+```sh
 cargo run --locked -- --config config/example.toml --dry
-cargo run --locked -- --config config/example.toml --run-for-secs 30
+cargo run --locked -- --live --config config/local.toml --preview-volume --run-for-secs 30
 ```
 
 Paid subscriptions default off. Health is at `http://127.0.0.1:9898/health`. See
 [the M1a runbook](docs/m1a.md) for fixture mode, spend-ledger initialization, credentials,
 capture format, the one-mint paid opt-in and the remaining live acceptance checks. The collector
-has no production signal alerts; later signal behaviour below is the product plan.
+prints volume previews only when explicitly enabled and real observed data passes the gates.
+It does not post signal alerts; later delivery and signal families below are the product plan.
 
 ## Signals
 
@@ -147,7 +162,7 @@ Spec: [docs/failover.md](docs/failover.md).
 
 | Milestone | Ships | Status |
 |---|---|---|
-| **M1 — Three spine slices** | M1a: single-source collector, bounded paid stream, durable spend stop, capture, health. M1b: one real volume signal through staging Discord with freshness. M1c: gate/TTL, watchdog/heal, supervision and checkpoint/delta storage contract. No production alerts. | M1a implemented; empirical acceptance pending. M1b/M1c pending |
+| **M1 — Three spine slices** | M1a: single-source collector, bounded paid stream, durable spend stop, capture, health. M1b: one real volume signal through staging Discord with freshness. M1c: gate/TTL, watchdog/heal, supervision and checkpoint/delta storage contract. No production alerts. | M1a implemented; real-data volume core/replay prepared. Live acceptance, Discord delivery and M1c pending |
 | **M2a — Delivery proven** | Budgets, hold queue, priority classes, dedup/cooldown, degradation contract, rank-store passive writer, card validator — with synthetic alerts into staging — plus the replay harness core and delivery-admission simulation. | Pending |
 | **M2b — Volume** | Ring and parameters, cohort percentiles, dispersion and participation, cold-baseline path, shadow probe. First real alerts, gated on a backtest report over ≥ 7 recorded days with a train/test split. | Pending |
 | **M3 — CTO** | Poll, Solana filter, diff with persisted high-water `claimDate` and posted-token set, per-mint latch, wording. | Pending |

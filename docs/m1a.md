@@ -2,7 +2,8 @@
 
 One Rust binary and library. The collector subscribes to free create/migration streams and,
 only with `--enable-paid`, one configured mint for a bounded observation window. It does not
-emit volume, CTO or wallet signals. M1b and M1c remain separate milestones.
+post volume, CTO or wallet signals. An opt-in volume preview core is now available; see
+[real-data.md](real-data.md). Live M1b acceptance and M1c remain separate work.
 
 ## Commands
 
@@ -12,7 +13,7 @@ Requires Rust 1.92.0 or later on Linux/macOS. Run from the repository root.
 cargo build --workspace --locked
 cargo run --locked -- --config config/example.toml --check-config
 cargo run --locked -- --config config/example.toml --dry
-cargo run --locked -- --config config/example.toml --run-for-secs 30
+cargo run --locked -- --live --config config/example.toml --run-for-secs 30
 ```
 
 While collection is running, inspect health from a second terminal:
@@ -30,12 +31,12 @@ detect a separate application or host using the same provider key.
 For offline fixture inspection (not the full M2a replay harness):
 
 ```sh
-cargo run --locked -- --config config/example.toml --fixture tests/fixtures/synthetic.jsonl
+cargo run --locked -- --config config/example.toml --fixture tests/fixtures/pumpportal-create-observed.jsonl
 cargo run --locked -- --inspect-capture data/capture/day-<UTC-epoch-day>/boot-<id>-<seq>.ocwcap
 ```
 
-Synthetic fixtures are labelled as such and never establish provider schema or completeness.
-The separately observed free-stream fixture and its checksum are documented in
+Artificial inputs are limited to isolated tests and never establish provider schema or completeness.
+The observed free-stream fixture and its checksum are documented in
 `tests/fixtures/README.md`. Noisy optional reserve values are counted and excluded from reserve
 math without rejecting a valid create. Concrete trade amounts remain exact raw-unit parses;
 a missing/unusable SOL leg is unresolved, never rounded into a fill.
@@ -50,7 +51,7 @@ first paid run, reconcile the linked wallet/provider allowance, then explicitly 
 
 ```sh
 cargo run --locked -- --config config/local.toml --init-spend-ledger
-cargo run --locked -- --config config/local.toml --enable-paid --run-for-secs 30
+cargo run --locked -- --live --config config/local.toml --enable-paid --run-for-secs 30
 ```
 
 Initialization never overwrites a ledger. A missing/corrupt/unwritable ledger blocks paid streams;

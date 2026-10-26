@@ -1,0 +1,34 @@
+[workspace]
+members = ["crates/ocw", "crates/ocw-core"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+
+[workspace.dependencies]
+ocw-core = { path = "crates/ocw-core" }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "signal", "net", "sync", "time", "io-util"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision"] }
+toml = "0.8.23"
+bs58 = "0.5.1"
+bytes = "1.12"
+sha2 = "0.10.9"
+fs2 = "0.4.3"
+zstd = "0.13.3"
+futures-util = { version = "0.3", features = ["sink"] }
+tokio-tungstenite = { version = "0.27.0", features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+url = "2.5"
+axum = "0.8.9"
+tempfile = "3.20"
+
+[profile.release]
+panic = "unwind"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+

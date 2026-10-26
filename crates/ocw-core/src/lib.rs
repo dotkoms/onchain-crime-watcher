@@ -6,6 +6,7 @@ mod discord;
 pub mod feed;
 pub mod health;
 mod outage;
+mod recovery;
 pub mod replay;
 mod session;
 pub mod spend;

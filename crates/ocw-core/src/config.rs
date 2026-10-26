@@ -10,6 +10,32 @@ pub struct Config {
     pub gate: GateConfig,
     pub capture: CaptureConfig,
     pub delivery: DeliveryConfig,
+    pub recovery: RecoveryConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RecoveryConfig {
+    pub reconnect_attempts: u8,
+    pub initial_backoff_ms: u64,
+    pub max_backoff_ms: u64,
+    pub healthy_reset_ms: u64,
+    pub ping_interval_ms: u64,
+    pub pong_timeout_ms: u64,
+    pub transport_idle_ms: u64,
+}
+impl Default for RecoveryConfig {
+    fn default() -> Self {
+        Self {
+            reconnect_attempts: 0,
+            initial_backoff_ms: 1000,
+            max_backoff_ms: 30_000,
+            healthy_reset_ms: 60_000,
+            ping_interval_ms: 20_000,
+            pong_timeout_ms: 10_000,
+            transport_idle_ms: 60_000,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -72,6 +98,7 @@ impl Default for Config {
             gate: GateConfig::default(),
             capture: CaptureConfig::default(),
             delivery: DeliveryConfig::default(),
+            recovery: RecoveryConfig::default(),
         }
     }
 }
@@ -119,6 +146,19 @@ impl Config {
         let c = &self.capture;
         let g = &self.gate;
         let d = &self.delivery;
+        let r = &self.recovery;
+        if r.reconnect_attempts > 5
+            || !(10..=30_000).contains(&r.initial_backoff_ms)
+            || r.max_backoff_ms < r.initial_backoff_ms
+            || r.max_backoff_ms > 60_000
+            || !(1000..=600_000).contains(&r.healthy_reset_ms)
+            || !(100..=60_000).contains(&r.ping_interval_ms)
+            || !(100..=30_000).contains(&r.pong_timeout_ms)
+            || r.transport_idle_ms < r.ping_interval_ms + r.pong_timeout_ms
+            || r.transport_idle_ms > 600_000
+        {
+            return Err("recovery limits are out of range".into());
+        }
         if !(1..=64).contains(&d.queue_capacity)
             || !(2..=10).contains(&d.hourly_cap)
             || !(1..=40).contains(&d.daily_cap)

@@ -91,6 +91,7 @@ pub(crate) struct Pipeline {
     pub decoder: Decoder,
     pub health: Arc<Health>,
     pub generation: u64,
+    pub(crate) ownership: Arc<ProcessLock>,
     tap: Tap,
     seq: u64,
     boot: String,
@@ -188,6 +189,10 @@ impl Pipeline {
     fn emit_volume(&mut self, decisions: Vec<Decision>, now: u64) {
         for decision in decisions {
             if let Some(preview) = decision.card(now) {
+                if !self.health.feed_connected() {
+                    inc(&self.health.app_suppressed);
+                    continue;
+                }
                 if let Some(sender) = &self.delivery {
                     sender.submit(decision.clone(), self.generation);
                 }
@@ -284,6 +289,9 @@ async fn run_inner(
         .map_err(|_| "cannot read health address")?;
     let health = Arc::new(Health::default());
     set_state(&health.paid_state, "off");
+    set_state(&health.transport_state, "not_started");
+    set_state(&health.application_state, "not_started");
+    set_state(&health.last_failure, "none");
     set_state(&health.feed_state, "starting");
     set(&health.volume_enabled, u64::from(options.preview_volume));
     let global_pause = Arc::new(Pause::default());
@@ -329,6 +337,7 @@ async fn run_inner(
     );
     let mut pipeline = Pipeline {
         decoder: Decoder::new(config.feed.dedup_capacity, config.feed.dedup_window_ms),
+        ownership: lock,
         health: health.clone(),
         generation: 0,
         tap,
@@ -372,6 +381,8 @@ async fn run_inner(
             "stopping"
         },
     );
+    set_state(&health.transport_state, "stopped");
+    set(&health.backoff_ms, 0);
     if let Some(sender) = delivery_runtime {
         sender.shutdown().await;
     }
@@ -433,4 +444,31 @@ async fn fixture(
 }
 
 #[cfg(test)]
+pub(crate) fn pipeline_for_test(
+    data_dir: &std::path::Path,
+) -> (Pipeline, tokio::sync::mpsc::Receiver<Record>) {
+    let ownership = Arc::new(ProcessLock::acquire(data_dir).unwrap());
+    let health = Arc::new(Health::default());
+    let (tap, records) = capture::channel(8, health.clone());
+    (
+        Pipeline {
+            decoder: Decoder::new(8, 180_000),
+            health,
+            generation: 1,
+            ownership,
+            tap,
+            seq: 0,
+            boot: "test".into(),
+            start: Instant::now(),
+            sensitive: None,
+            volume: None,
+            delivery: None,
+        },
+        records,
+    )
+}
+
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_recovery;

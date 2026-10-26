@@ -1,0 +1,42 @@
+[Unit]
+Description=Onchain Crime Watcher collector
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ocw
+Group=ocw
+WorkingDirectory=/var/lib/ocw
+EnvironmentFile=/etc/ocw/ocw.env
+ExecStartPre=/opt/ocw/current/ocw --config /etc/ocw/config.toml --preflight
+ExecStart=/opt/ocw/current/ocw --config /etc/ocw/config.toml --live --preview-volume
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0077
+StateDirectory=ocw
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/ocw
+MemoryMax=1G
+TasksMax=128
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

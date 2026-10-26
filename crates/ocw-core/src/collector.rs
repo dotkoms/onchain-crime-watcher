@@ -384,6 +384,12 @@ async fn run_inner(
     if config.probe.enabled && options.fixture.is_some() {
         return Err("chain probing requires live collection".into());
     }
+    if options.fixture.is_none() && crate::storage::restore_review_required(&config.data_dir) {
+        return Err(
+            "restored storage requires spend and delivery reconciliation before live startup"
+                .into(),
+        );
+    }
     let lock = Arc::new(
         ProcessLock::acquire(&config.data_dir)
             .map_err(|_| "cannot acquire private data directory/collector lock")?,

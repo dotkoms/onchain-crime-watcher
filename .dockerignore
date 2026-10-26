@@ -1,0 +1,15 @@
+.git
+.agents
+.codex
+.env
+.env.*
+!.env.example
+target
+data
+data-*
+config/local.toml
+*.pem
+*.ocwcap
+*.ocwh
+*.tar
+*.tar.gz

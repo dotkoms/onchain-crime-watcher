@@ -6,3 +6,6 @@
 !/.env.example
 /config/local.toml
 *.pem
+
+/backups/
+/scripts/__pycache__/

@@ -72,3 +72,8 @@ impl Drop for ProcessLock {
         let _ = fs2::FileExt::unlock(&self.0);
     }
 }
+
+/// Restored delivery/spend state can be older than real external side effects.
+pub fn restore_review_required(data: &Path) -> bool {
+    fs::symlink_metadata(data.join("restore-review-required.json")).is_ok()
+}

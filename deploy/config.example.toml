@@ -1,0 +1,86 @@
+# Hosting template. Nothing connects until explicitly started with --live.
+# Collector and optional staging configuration. Copy to config/local.toml for your machine.
+# Run from the repository root. data_dir must be a real private directory (0700),
+# or absent so ocw can create it. Secrets are environment-only, never TOML.
+data_dir = "/var/lib/ocw"
+health_bind = "127.0.0.1:9898"
+
+[feed]
+# Opt-in automatic bounded launch watching instead of a fixed mint. Still requires --enable-paid.
+auto_watch = false
+# mint = "YOUR_ONE_MINT_BASE58_ADDRESS"
+max_frame_bytes = 65536
+dedup_capacity = 4096
+dedup_window_ms = 180000
+connect_timeout_ms = 10000
+paid_window_s = 10
+
+[gate]
+# Current provider pricing: 1,000,000 messages/SOL. This is a LOCAL allowance.
+# Stop at 490,000 reserved messages; 10,000-message margin is measured, not guaranteed.
+daily_messages = 500000
+stop_margin_messages = 10000
+reservation_messages = 1000
+
+[capture]
+queue_capacity = 4096
+max_bytes = 2147483648
+retention_days = 14
+min_free_bytes = 2147483648
+
+# Only used with explicit --live --enable-staging-delivery. Webhook URL is environment-only.
+[delivery]
+# staging_channel_id = "YOUR_PUBLIC_DISCORD_CHANNEL_ID"
+queue_capacity = 64
+hourly_cap = 10
+daily_cap = 40
+burst = 2
+request_timeout_ms = 2000
+
+# Reconnect remains off until deliberately configured. Recovery sockets are free-only.
+[recovery]
+reconnect_attempts = 0
+initial_backoff_ms = 1000
+max_backoff_ms = 30000
+healthy_reset_ms = 60000
+ping_interval_ms = 20000
+pong_timeout_ms = 10000
+transport_idle_ms = 60000
+
+# Structured heartbeat/readiness; no network reporting unless independently configured.
+[monitor]
+enabled = true
+discord_status = false
+# status_channel_id = "YOUR_PUBLIC_STATUS_CHANNEL_ID"
+deadman = false
+heartbeat_s = 300
+deadman_s = 60
+stall_ms = 5000
+timeout_ms = 2000
+# Secrets are environment-only: OCW_DISCORD_STATUS_URL and OCW_DEADMAN_URL.
+
+# Durable normalized observations and explicit coverage gaps. No recovery makes a gap complete.
+[history]
+enabled = true
+max_bytes = 536870912
+
+# Used only with feed.auto_watch=true, --live and --enable-paid.
+[watch]
+max_subs = 20
+launch_slots = 4
+launch_s = 10
+retain_window_s = 300
+retain_min_lamports = 3000000000
+ttl_s = 1800
+keepalive_lamports = 500000000
+evict_margin_bps = 15000
+
+# Independent confirmed-chain watchdog samples, disabled until a separate RPC is supplied.
+# Requires three actually watched recent curve mints; manual one-mint mode cannot supply that.
+[probe]
+enabled = false
+# Audit-only bounded curve gap scans; requires history.enabled and finite reconnects.
+heal_enabled = false
+calls_per_day = 50000
+calls_per_minute = 600
+interval_s = 30

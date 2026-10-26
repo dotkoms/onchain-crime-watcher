@@ -230,3 +230,36 @@ fn executable_replays_observed_frames_without_credentials_or_invented_signals() 
     assert_eq!(fs::read(&path).unwrap(), before);
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
 }
+
+#[test]
+fn offline_preflight_reports_missing_secrets_without_connecting_or_creating_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = config(dir.path());
+    let output = Command::new(env!("CARGO_BIN_EXE_ocw"))
+        .args([
+            "--config",
+            path.to_str().unwrap(),
+            "--preflight",
+            "--enable-paid",
+            "--enable-staging-delivery",
+        ])
+        .env_remove("OCW_PUMPPORTAL_KEY")
+        .env_remove("OCW_DISCORD_STAGING_URL")
+        .env_remove("OCW_DISCORD_STATUS_URL")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["mode"], "offline_preflight");
+    assert_eq!(result["configuration_ready"], false);
+    assert_eq!(result["network"], "disabled");
+    assert!(!dir.path().join("data").exists());
+    let output = Command::new(env!("CARGO_BIN_EXE_ocw"))
+        .args(["--config", path.to_str().unwrap(), "--preflight"])
+        .env_remove("OCW_PUMPPORTAL_KEY")
+        .env_remove("OCW_DISCORD_STATUS_URL")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(!dir.path().join("data").exists());
+}

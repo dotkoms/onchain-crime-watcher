@@ -238,3 +238,29 @@ async fn failed_capture_is_visible_while_live_collection_and_health_continue() {
     assert_eq!(snapshot["capture"]["state"], "error");
     assert_eq!(snapshot["feed"]["state"], "connected");
 }
+
+#[tokio::test]
+async fn restored_storage_cannot_start_live_networking_before_external_state_reconciliation() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        data_dir: dir.path().join("data"),
+        ..Config::default()
+    };
+    crate::storage::private_dir(&config.data_dir).unwrap();
+    std::fs::write(config.data_dir.join("restore-review-required.json"), b"{}").unwrap();
+    let error = run_inner(
+        config.clone(),
+        Options::default(),
+        Secrets::default(),
+        Url::parse("ws://127.0.0.1:1").unwrap(),
+        std::future::pending(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error,
+        "restored storage requires spend and delivery reconciliation before live startup"
+    );
+    assert!(!config.data_dir.join("collector.lock").exists());
+    assert!(!config.data_dir.join("capture").exists());
+}

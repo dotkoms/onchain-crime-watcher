@@ -27,3 +27,5 @@ pub mod watch;
 pub mod probe;
 
 pub mod heal;
+
+pub mod setup;

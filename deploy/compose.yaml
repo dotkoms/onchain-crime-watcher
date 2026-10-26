@@ -1,0 +1,50 @@
+# Preparation only. Explicitly opt into the live profile when you choose to run it.
+services:
+  collector:
+    profiles: [live]
+    image: ${OCW_IMAGE:-ocw:local}
+    build:
+      context: ..
+    init: true
+    user: "10001:10001"
+    working_dir: /var/lib/ocw
+    env_file:
+      - path: ../.env
+        required: true
+    volumes:
+      - type: bind
+        source: ../config/local.toml
+        target: /etc/ocw/config.toml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../data
+        target: /var/lib/ocw
+        bind:
+          create_host_path: false
+    # Free collection by default. Add --enable-paid or --enable-staging-delivery
+    # only after the corresponding offline preflight and external acceptance.
+    command: [--live, --config, /etc/ocw/config.toml, --preview-volume]
+    restart: "on-failure:3"
+    stop_grace_period: 30s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, --max-time, "2", http://127.0.0.1:9898/ready]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
+    # Loopback health stays inside the container; do not publish it publicly.

@@ -38,13 +38,18 @@ Production delivery remains off while provider coverage, billing, Discord accept
 
 | Component | Current capability |
 | --- | --- |
-| Real-event collection | One PumpPortal socket; free create/migration events and an opt-in paid observation of one mint. |
+| Real-event collection | One PumpPortal socket; free create/migration events and opt-in bounded paid observation of one mint or automatic launch watching. |
 | Exact amounts | Integer raw-unit decoding, bounded deduplication, and explicit accounting for unresolved SOL amounts. |
 | Volume analysis | Create-anchored buckets, trimmed baselines, participation and concentration gates, and a labelled cold-baseline path. Thresholds remain unvalidated priors. |
 | Recorded captures | Bounded, compressed, checksummed capture with loss accounting, checked shutdown, and read-only diagnostic inspection/replay. |
 | Guarded staging delivery | Expiring candidates, delivery budgets, durable reservations, and no automatic retry after an ambiguous POST. |
 | Bounded recovery | Optional free-only reconnects, finite retry budgets, transport/application liveness, and bounded pipeline panic recovery. |
+| Durable observations | Optional checksum-chained normalized journal, durable prefix checkpoints and explicit loss/restart gaps. |
+| Independent chain checks | Opt-in watched-curve probes and bounded ordered curve recovery into audit history; global coverage stays partial. |
+| Hosting preparation | Offline preflight, Docker/systemd templates and checksummed stopped-process snapshots; nothing deployed. |
 | Local visibility | Loopback health endpoint, spend accounting, connection generations, and failure counters. |
+
+See the [hosting preparation guide](docs/hosting.md) and [history/watch runbook](docs/history.md). The wider CTO, bundle, wallet and secondary-feed features remain under development.
 
 ## Quickstart
 

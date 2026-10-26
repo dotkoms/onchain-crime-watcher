@@ -21,6 +21,7 @@ struct Cli {
     paid: bool,
     dry: bool,
     check: bool,
+    preflight: bool,
     init: bool,
     seconds: Option<u64>,
 }
@@ -31,7 +32,7 @@ fn parse() -> Result<Option<Cli>, String> {
         match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "ocw [--status]                               Waiting-for-data status (default)\nocw --replay-capture <segment.ocwcap> [--json] Recorded real frames and volume previews\nocw --config <file> --fixture <raw-JSONL>     Recorded frame inspection\nocw --live --config <file> [--run-for-secs N] [--enable-paid] [--preview-volume] [--enable-staging-delivery]\nocw --config <file> --dry | --check-config | --init-spend-ledger\nocw --inspect-capture <segment.ocwcap>\nNetworking requires --live. No sample data or generated signals are supplied.\nPaid mode requires feed.mint or feed.auto_watch, OCW_PUMPPORTAL_KEY and an explicitly initialized ledger.\nStaging delivery requires its explicit flag, OCW_DISCORD_STAGING_URL and delivery.staging_channel_id. Production delivery remains disabled."
+                    "ocw [--status]                               Waiting-for-data status (default)\nocw --replay-capture <segment.ocwcap> [--json] Recorded real frames and volume previews\nocw --config <file> --fixture <raw-JSONL>     Recorded frame inspection\nocw --live --config <file> [--run-for-secs N] [--enable-paid] [--preview-volume] [--enable-staging-delivery]\nocw --config <file> --dry | --check-config | --preflight | --init-spend-ledger\nocw --inspect-capture <segment.ocwcap>\nNetworking requires --live. No sample data or generated signals are supplied.\nPaid mode requires feed.mint or feed.auto_watch, OCW_PUMPPORTAL_KEY and an explicitly initialized ledger.\nStaging delivery requires its explicit flag, OCW_DISCORD_STAGING_URL and delivery.staging_channel_id. Production delivery remains disabled."
                 );
                 return Ok(None);
             }
@@ -72,6 +73,7 @@ fn parse() -> Result<Option<Cli>, String> {
             "--enable-paid" => cli.paid = true,
             "--dry" => cli.dry = true,
             "--check-config" => cli.check = true,
+            "--preflight" => cli.preflight = true,
             "--init-spend-ledger" => cli.init = true,
             _ => return Err("unknown argument; use --help (argument values redacted)".into()),
         }
@@ -79,6 +81,7 @@ fn parse() -> Result<Option<Cli>, String> {
     let modes = [
         cli.dry,
         cli.check,
+        cli.preflight,
         cli.init,
         cli.inspect.is_some(),
         cli.live,
@@ -92,7 +95,7 @@ fn parse() -> Result<Option<Cli>, String> {
     if modes > 1 {
         return Err("choose one collector/inspection mode".into());
     }
-    if cli.paid && !cli.live && !cli.dry {
+    if cli.paid && !cli.live && !cli.dry && !cli.preflight {
         return Err(
             "--enable-paid requires explicit --live (or --dry for a subscription preview)".into(),
         );
@@ -112,7 +115,7 @@ fn parse() -> Result<Option<Cli>, String> {
     if cli.json && cli.replay.is_none() {
         return Err("--json is only valid for capture replay".into());
     }
-    if cli.staging_delivery && !cli.live {
+    if cli.staging_delivery && !cli.live && !cli.preflight {
         return Err("--enable-staging-delivery requires explicit --live".into());
     }
     if cli.preview_volume && !cli.live {
@@ -194,6 +197,17 @@ async fn execute(cli: Cli) -> Result<(), String> {
         return Ok(());
     }
     let config = read_config(cli.config.unwrap_or_else(|| "config/example.toml".into()))?;
+    if cli.preflight {
+        let result = ocw_core::setup::check(&config, cli.paid, cli.staging_delivery, |key| {
+            std::env::var(key).ok()
+        });
+        println!("{result}");
+        return if result["configuration_ready"] == true {
+            Ok(())
+        } else {
+            Err("offline preflight found missing or invalid configuration; values redacted".into())
+        };
+    }
     if cli.check {
         println!("{}", json!({"configuration":"valid","paid_default":false}));
         return Ok(());
@@ -238,7 +252,13 @@ async fn execute(cli: Cli) -> Result<(), String> {
         fixture: cli.fixture,
         run_for: cli.seconds.map(Duration::from_secs),
     };
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|_| "cannot install termination handler")?;
     let result = collector::run(config, options, async {
+        #[cfg(unix)]
+        tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=terminate.recv()=>{} }
+        #[cfg(not(unix))]
         let _ = tokio::signal::ctrl_c().await;
     })
     .await?;

@@ -149,16 +149,8 @@ impl Client {
         daily: u64,
         per_minute: usize,
     ) -> Result<Self, Failure> {
-        let url = Url::parse(raw).map_err(|_| Failure::Invalid)?;
-        if raw.len() > 2048
-            || url.scheme() != "https"
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.fragment().is_some()
-            || !(1..=50_000).contains(&daily)
-            || !(1..=600).contains(&per_minute)
-        {
+        let url = endpoint(raw)?;
+        if !(1..=50_000).contains(&daily) || !(1..=600).contains(&per_minute) {
             return Err(Failure::Invalid);
         }
         let root = data.join("rpc");
@@ -326,3 +318,17 @@ impl Client {
 }
 #[cfg(test)]
 mod tests;
+
+pub(crate) fn endpoint(raw: &str) -> Result<Url, Failure> {
+    let url = Url::parse(raw).map_err(|_| Failure::Invalid)?;
+    if raw.len() > 2048
+        || url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(Failure::Invalid);
+    }
+    Ok(url)
+}

@@ -17,7 +17,22 @@ jobs:
       - run: cargo +1.92.0 clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo +1.92.0 test --workspace --locked
       - run: cargo +1.92.0 build --workspace --locked
+      - name: Offline storage snapshot contracts
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: RustSec dependency audit
         run: |
           cargo +1.92.0 install cargo-audit --version 0.22.1 --locked
           cargo +1.92.0 audit
+
+  container:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build image (no deployment)
+        run: docker build --tag ocw:ci .
+      - name: Verify disconnected startup and offline hosting preflight
+        run: |
+          docker run --rm --network none ocw:ci --status
+          docker run --rm --network none -v "$PWD/deploy/config.example.toml:/etc/ocw/config.toml:ro" ocw:ci --config /etc/ocw/config.toml --preflight

@@ -92,3 +92,14 @@ Reliability foundations (increment within the requested reliability step):
 
 See [history and watch runbook](../docs/history.md). No live provider or Discord acceptance
 was performed for these foundations; no deployment was created.
+
+Hosting preparation increment:
+
+- [x] Offline selected-mode preflight with redacted missing-input reports.
+- [x] SIGTERM shutdown, non-root Docker/Compose and bounded systemd templates.
+- [x] Offline checksummed snapshots, safe restore and live-start reconciliation barrier.
+- [x] Hosting, secret, persistent-storage, monitoring and rollback runbook.
+- [ ] Container build/runtime CI result and actual target-host systemd validation.
+- [ ] Live staging and provider acceptance when explicitly authorized.
+
+No host, external monitor account, backup schedule or deployment was created.

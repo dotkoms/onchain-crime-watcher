@@ -108,7 +108,7 @@ impl Drop for Runtime {
     }
 }
 
-fn deadman_url(raw: &str) -> Result<Url, String> {
+pub(crate) fn deadman_url(raw: &str) -> Result<Url, String> {
     let url = Url::parse(raw).map_err(|_| "invalid dead-man URL (redacted)")?;
     let id = url.path().trim_start_matches('/');
     if raw.len() > 2048

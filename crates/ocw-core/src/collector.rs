@@ -7,6 +7,7 @@ use crate::{
     health::{self, Health, inc, set, set_state},
     outage,
     storage::ProcessLock,
+    supervision::{self, AbortOnDrop},
     volume::{Decision, Engine},
 };
 use bytes::Bytes;
@@ -294,11 +295,23 @@ async fn run_inner(
     set_state(&health.last_failure, "none");
     set_state(&health.feed_state, "starting");
     set_state(&health.capture_shutdown, "not_requested");
+    set_state(&health.supervisor_state, "watching");
+    set_state(&health.pipeline_state, "starting");
+    set_state(&health.capture_worker_state, "running");
+    set_state(
+        &health.delivery_worker_state,
+        if options.staging_delivery {
+            "running"
+        } else {
+            "disabled"
+        },
+    );
+    set_state(&health.health_worker_state, "running");
     set(&health.volume_enabled, u64::from(options.preview_volume));
     let global_pause = Arc::new(Pause::default());
     let boot = format!("{:x}{:x}", wall_ms(), std::process::id());
     let origin = Instant::now();
-    let delivery_runtime = if options.staging_delivery {
+    let mut delivery_runtime = if options.staging_delivery {
         Some(
             delivery::Runtime::start(
                 config.delivery.clone(),
@@ -324,14 +337,18 @@ async fn run_inner(
         .as_ref()
         .map(|runtime| runtime.handle.clone());
     let (stop_server, mut stop_rx) = tokio::sync::watch::channel(false);
-    let mut server = tokio::spawn(health::serve(listener, health.clone(), async move {
-        while !*stop_rx.borrow() {
-            if stop_rx.changed().await.is_err() {
-                break;
+    let mut server = AbortOnDrop(tokio::spawn(health::serve(
+        listener,
+        health.clone(),
+        async move {
+            while !*stop_rx.borrow() {
+                if stop_rx.changed().await.is_err() {
+                    break;
+                }
             }
-        }
-    }));
-    let (tap, writer) = capture::spawn_owned(
+        },
+    )));
+    let (tap, mut writer) = capture::spawn_owned(
         config.data_dir.join("capture"),
         config.capture.clone(),
         health.clone(),
@@ -362,18 +379,43 @@ async fn run_inner(
             std::future::pending::<()>().await;
         }
     };
-    let operation = async {
-        if let Some(path) = &options.fixture {
-            fixture(path, &config, &mut pipeline).await
-        } else {
-            crate::session::live(&config, &mut pipeline, &secrets, endpoint, options.paid).await
-        }
+    let mut source = supervised::Input {
+        config: &config,
+        secrets: &secrets,
+        endpoint,
+        fixture: options.fixture.as_deref(),
+        retry: crate::recovery::RetryPolicy::new(&config.recovery, wall_ms()),
     };
-    let (result, server_done) = tokio::select! {
-        result=operation=>(result,false),
-        _=shutdown=>(Ok(()),false),
-        _=timer=>(Ok(()),false),
-        _=&mut server=>(Err("health server stopped unexpectedly".into()),true),
+    let mut writer_outcome = None;
+    let (result, server_done) = {
+        let operation = supervised::run(&mut pipeline, &mut source, &config, options.paid);
+        tokio::pin!(operation, shutdown, timer);
+        loop {
+            tokio::select! {
+                result=&mut operation=>break (result,false),
+                _=&mut shutdown=>break (Ok(()),false),
+                _=&mut timer=>break (Ok(()),false),
+                _=&mut server=>{
+                    supervision::red(&health,"health");
+                    break (Err("health server stopped unexpectedly".into()),true);
+                },
+                outcome=&mut writer, if writer_outcome.is_none()=>{
+                    if outcome.is_err() || health.snapshot()["capture"]["state"] == "error" {
+                        set_state(&health.capture_state,"error");
+                        supervision::red(&health,"capture");
+                    } else {
+                        set_state(&health.capture_worker_state,"stopped");
+                    }
+                    writer_outcome=Some(outcome);
+                },
+                _=async {
+                    match &mut delivery_runtime {
+                        Some(runtime)=>runtime.completed().await,
+                        None=>std::future::pending().await,
+                    }
+                }=>supervision::red(&health,"delivery"),
+            }
+        }
     };
     set_state(
         &health.feed_state,
@@ -385,9 +427,10 @@ async fn run_inner(
     );
     set_state(&health.transport_state, "stopped");
     set(&health.backoff_ms, 0);
-    if let Some(sender) = delivery_runtime {
-        sender.shutdown().await;
-    }
+    let delivery_result = match delivery_runtime {
+        Some(sender) => sender.shutdown().await,
+        None => Ok(()),
+    };
     if result.is_err() {
         set_state(&health.feed_state, "failed");
         pipeline.control("outage", json!({"class":"collector_failure"}));
@@ -408,14 +451,48 @@ async fn run_inner(
         "shutdown",
         json!({"operation_clean":result.is_ok(),"capture_flush":"pending"}),
     );
-    let capture_result =
-        capture::shutdown(pipeline.tap, writer, &health, Duration::from_secs(5)).await;
+    let capture_result = capture::shutdown(
+        pipeline.tap,
+        async move {
+            match writer_outcome {
+                Some(outcome) => outcome,
+                None => writer.await,
+            }
+        },
+        &health,
+        Duration::from_secs(5),
+    )
+    .await;
     let _ = stop_server.send(true);
     if !server_done {
-        let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), &mut server).await;
+    }
+    if capture_result.is_err() {
+        supervision::red(&health, "capture");
+    } else if health.snapshot()["supervision"]["capture"] != "red" {
+        set_state(&health.capture_worker_state, "stopped");
+    }
+    if delivery_result.is_err() {
+        supervision::red(&health, "delivery");
+    } else if options.staging_delivery {
+        set_state(&health.delivery_worker_state, "stopped");
+    }
+    if health.snapshot()["supervision"]["pipeline"] != "red" {
+        set_state(
+            &health.pipeline_state,
+            if result.is_err() { "failed" } else { "stopped" },
+        );
+    }
+    if !server_done {
+        set_state(&health.health_worker_state, "stopped");
     }
     result?;
     capture_result?;
+    delivery_result?;
+    if health.snapshot()["supervision"]["state"] == "red" {
+        return Err("supervised stage remains red; explicit restart required".into());
+    }
+    set_state(&health.supervisor_state, "stopped");
     Ok(health.snapshot())
 }
 
@@ -475,3 +552,5 @@ pub(crate) fn pipeline_for_test(
 mod tests;
 #[cfg(test)]
 mod tests_recovery;
+
+mod supervised;

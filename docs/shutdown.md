@@ -42,9 +42,9 @@ This matches the existing spend-reservation and staging-journal ownership rules.
 A started blocking disk operation cannot be aborted by Tokio. The async deadline bounds the
 caller's wait, not an OS write or runtime teardown. A library host can still wait for blocking
 workers when dropping its runtime; a hard process stop can leave an incomplete tail. Unattended
-operation still needs external process supervision and a hard shutdown limit. This slice does
-not implement task restart supervision, delivery flush guarantees, independent probes,
-heartbeat/dead-man monitoring, or the full M1c shutdown contract.
+operation still needs external process supervision and a hard shutdown limit. Current-stage [crash containment](supervision.md) adds pipeline panic recovery and worker
+monitoring. The complete task topology, delivery flush guarantees, independent probes,
+heartbeat/dead-man monitoring, and the full M1c shutdown contract remain pending.
 
 ## Local verification
 

@@ -103,7 +103,7 @@ fn capture_io_failure_exits_unsuccessfully_without_exposing_paths() {
     assert_eq!(result.status.code(), Some(2));
     assert_eq!(
         String::from_utf8(result.stderr).unwrap().trim(),
-        "ocw: capture writer failed; shutdown incomplete"
+        "{\"event\":\"stage_red\",\"stage\":\"capture\"}\nocw: capture writer failed; shutdown incomplete"
     );
     assert_eq!(fs::read(data.join("capture")).unwrap(), b"operator file");
 }

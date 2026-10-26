@@ -53,3 +53,14 @@ Independent probing/heal, full task supervision and real staging acceptance rema
 
 Full task supervision, delivery shutdown guarantees, heartbeat/dead-man monitoring, independent
 probing/heal and real external acceptance remain pending.
+
+## Task supervision and crash containment
+
+- [x] Monitor current worker completion during live collection and latch stage failures.
+- [x] Bound pipeline panic recovery; rebuild cold and recover free-only without refilling transport credits.
+- [x] Preserve health while pipeline recovery is red; redact executable panic output.
+- [x] Clean up async health and staging workers on cancellation; retain pending disk ownership.
+- [x] Fault tests, policy mutation check, runbook and complete locked checks.
+
+Full JoinSet topology, automatic disk/delivery rebuild, heartbeat/dead-man reporting, probes/heal,
+checkpoint/delta storage, saturation measurements and real acceptance remain pending.

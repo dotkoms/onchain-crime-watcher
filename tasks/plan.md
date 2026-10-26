@@ -100,3 +100,20 @@ Prove real directory I/O failure, normal sealed capture, a saturated unconsumed 
 panic, and lock retention during a timed-out/cancelled await. Then run the complete locked
 checks and document OS/runtime shutdown limits. No new provider, webhook or demo inputs.
 Full task restart supervision and the rest of M1c remain separate.
+
+## Task supervision and crash containment
+
+Monitor pipeline, capture, staging delivery, and health completion while live. Contain pipeline
+unwinds, reset uncertain decoder/volume state, and recover free-only with a five-restart/600 s
+budget, capped jittered backoff, and three-early-panic fast failure. Keep transport retry credits
+outside restart attempts. Exhausted pipeline recovery latches red and leaves health available
+until shutdown. Background disk/delivery failures latch red without replaying uncertain writes;
+health-server failure ends the run because local diagnosis is no longer available.
+
+Install payload-redacting panic output before CLI configuration. Abort async health serving and
+signal staging cancellation when the collector future is dropped. Preserve existing blocking
+worker ownership, receipt ambiguity and capture shutdown rules. Test policy boundaries, actual
+panic recovery/cold reset, paid opt-out and retry-credit continuity, red health availability,
+background worker observation, and cancellation cleanup. No new external integration or demo data.
+This is the current-stage containment slice; automatic disk-worker rebuild, full JoinSet topology,
+heartbeat/dead-man reporting and the remaining M1c contracts stay pending.

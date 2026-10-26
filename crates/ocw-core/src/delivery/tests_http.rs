@@ -404,7 +404,7 @@ async fn configured_runtime_checks_identity_uses_worker_and_retains_process_owne
         .handle
         .submit(candidate(Verdict::Fire, 1, origin).decision, 1);
     until(|| health.snapshot()["staging_delivery"]["sent"] == 1).await;
-    runtime.shutdown().await;
+    runtime.shutdown().await.unwrap();
     assert!(crate::storage::ProcessLock::acquire(&data_dir).is_ok());
     assert_eq!(endpoint.seen.lock().unwrap().len(), 2); // readiness GET, then one POST
 }
@@ -474,5 +474,69 @@ async fn a_changed_response_channel_blocks_further_posts_and_marks_the_outcome_u
     );
     assert_eq!(worker.health.snapshot()["staging_delivery"]["unknown"], 1);
     assert_eq!(worker.health.snapshot()["staging_delivery"]["sent"], 0);
+    assert_eq!(endpoint.seen.lock().unwrap().len(), 1);
+}
+
+async fn idle_runtime(data_dir: &std::path::Path) -> (super::Runtime, Server) {
+    let endpoint = server(vec![reply(
+        200,
+        json!({"id":"1","type":1,"channel_id":"22"}),
+    )])
+    .await;
+    let health = Arc::new(Health::default());
+    let global = Arc::new(Pause::default());
+    let context = super::Context {
+        data_dir: data_dir.to_path_buf(),
+        health,
+        global: global.clone(),
+        guard: Arc::new(crate::storage::ProcessLock::acquire(data_dir).unwrap()),
+        boot: "idle".into(),
+        origin: Instant::now(),
+    };
+    let runtime = super::Runtime::with_http(
+        DeliveryConfig {
+            staging_channel_id: Some("22".into()),
+            ..DeliveryConfig::default()
+        },
+        Http::local(endpoint.url.clone(), global),
+        context,
+    )
+    .await
+    .unwrap();
+    (runtime, endpoint)
+}
+#[tokio::test]
+async fn dropping_delivery_runtime_stops_worker_and_releases_directory_ownership() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let (runtime, endpoint) = idle_runtime(&data).await;
+    assert!(crate::storage::ProcessLock::acquire(&data).is_err());
+    drop(runtime);
+    until(|| crate::storage::ProcessLock::acquire(&data).is_ok()).await;
+    assert_eq!(endpoint.seen.lock().unwrap().len(), 1); // Readiness only, no notification.
+}
+#[tokio::test]
+async fn delivery_fatal_exit_is_observed_and_cannot_report_clean_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let (mut runtime, endpoint) = idle_runtime(&data).await;
+    let queue = runtime.handle.queue.clone();
+    let _ = std::thread::spawn(move || {
+        let _held = queue.lock().unwrap();
+        panic!("isolated poisoned queue fault");
+    })
+    .join();
+    tokio::time::timeout(Duration::from_secs(2), runtime.completed())
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.handle.health.snapshot()["staging_delivery"]["state"],
+        "queue_error"
+    );
+    assert_eq!(
+        runtime.shutdown().await,
+        Err("staging delivery worker stopped unexpectedly")
+    );
+    assert!(crate::storage::ProcessLock::acquire(&data).is_ok());
     assert_eq!(endpoint.seen.lock().unwrap().len(), 1);
 }

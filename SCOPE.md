@@ -10,7 +10,8 @@ implemented; verification and remaining empirical acceptance are recorded in `do
 `tasks/todo.md`. At the user's request, default startup is disconnected and real-data-only volume
 preparation proceeds without demos (`docs/real-data.md`). A staging sender is implemented behind
 explicit opt-in (`docs/staging-delivery.md`). The first M1c transport-recovery slice is documented
-in `docs/recovery.md`; real M1b acceptance and the rest of M1c remain pending.
+in `docs/recovery.md`; current-stage crash containment and worker monitoring are documented in
+`docs/supervision.md`. Real M1b acceptance and the rest of M1c remain pending.
 
 ## 0. Revision log
 

@@ -174,3 +174,66 @@ async fn capture_io_failure_is_not_a_successful_collector_shutdown() {
     );
     assert!(ProcessLock::acquire(&data).is_ok());
 }
+
+#[tokio::test]
+async fn failed_capture_is_visible_while_live_collection_and_health_continue() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    crate::storage::private_dir(&data).unwrap();
+    std::fs::write(data.join("capture"), b"operator file").unwrap();
+    let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let health_addr = reserved.local_addr().unwrap();
+    drop(reserved);
+    let config = Config {
+        data_dir: data,
+        health_bind: health_addr,
+        ..Config::default()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = Url::parse(&format!("ws://{}", listener.local_addr().unwrap())).unwrap();
+    let (connected, ready) = tokio::sync::oneshot::channel();
+    let provider = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        for _ in 0..2 {
+            socket.next().await.unwrap().unwrap();
+        }
+        connected.send(()).unwrap();
+        let _ = socket.next().await;
+    });
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let collector = tokio::spawn(run_inner(
+        config,
+        Options::default(),
+        Secrets::default(),
+        endpoint,
+        async {
+            let _ = stopped.await;
+        },
+    ));
+    tokio::time::timeout(Duration::from_secs(2), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot: Value = reqwest::get(format!("http://{health_addr}/health"))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if snapshot["supervision"]["capture"] == "red" {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    stop.send(()).unwrap();
+    assert!(collector.await.unwrap().is_err());
+    provider.await.unwrap();
+    let snapshot = snapshot.expect("capture failure was not observed while live");
+    assert_eq!(snapshot["capture"]["state"], "error");
+    assert_eq!(snapshot["feed"]["state"], "connected");
+}

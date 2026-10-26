@@ -11,4 +11,5 @@ pub mod replay;
 mod session;
 pub mod spend;
 pub mod storage;
+pub mod supervision;
 pub mod volume;

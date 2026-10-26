@@ -112,6 +112,7 @@ pub(crate) async fn live(
     secrets: &Secrets,
     endpoint: Url,
     paid_requested: bool,
+    retry: &mut RetryPolicy,
 ) -> Result<(), String> {
     let mut budget = if paid_requested {
         match Ledger::open(
@@ -148,7 +149,6 @@ pub(crate) async fn live(
         }
     }
     let mut paid = budget.is_some();
-    let mut retry = RetryPolicy::new(&config.recovery, wall_ms() ^ u64::from(std::process::id()));
     loop {
         pipeline.decoder.reset_session();
         pipeline.reset_volume();

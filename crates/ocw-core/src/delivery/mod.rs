@@ -71,7 +71,7 @@ impl Handle {
 pub(crate) struct Runtime {
     pub handle: Handle,
     stop: watch::Sender<bool>,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
 }
 pub(crate) struct Context {
     pub data_dir: PathBuf,
@@ -128,10 +128,14 @@ impl Runtime {
         http.verify().await?;
         let path = data_dir.join("staging-delivery.json");
         let policy = config.clone();
-        let journal = tokio::task::spawn_blocking(move || store::Journal::open(&path, &policy))
-            .await
-            .map_err(|_| "delivery journal worker failed")?
-            .map_err(|_| "delivery journal unavailable; refusing staging sends")?;
+        let opening_guard = guard.clone();
+        let journal = tokio::task::spawn_blocking(move || {
+            let _guard = opening_guard;
+            store::Journal::open(&path, &policy)
+        })
+        .await
+        .map_err(|_| "delivery journal worker failed")?
+        .map_err(|_| "delivery journal unavailable; refusing staging sends")?;
         set(&health.delivery_enabled, 1);
         set_state(&health.delivery_state, "ready");
         let queue = Arc::new(Mutex::new(Queue::new(config.queue_capacity)));
@@ -156,15 +160,48 @@ impl Runtime {
                 http, journal, queue, notify, rx, health, global,
             ));
         });
-        Ok(Self { handle, stop, task })
+        Ok(Self {
+            handle,
+            stop,
+            task: Some(task),
+        })
     }
-    pub async fn shutdown(mut self) {
+    pub async fn completed(&mut self) {
+        let Some(task) = &mut self.task else {
+            return std::future::pending().await;
+        };
+        if task.await.is_err() {
+            set_state(&self.handle.health.delivery_state, "worker_error");
+        }
+        self.task = None;
+    }
+    pub async fn shutdown(mut self) -> Result<(), &'static str> {
         self.handle.active.store(false, Ordering::Relaxed);
         let _ = self.stop.send(true);
-        match tokio::time::timeout(Duration::from_secs(3), &mut self.task).await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => set_state(&self.handle.health.delivery_state, "worker_error"),
-            Err(_) => set_state(&self.handle.health.delivery_state, "shutdown_pending"),
+        let Some(task) = &mut self.task else {
+            return Err("staging delivery worker stopped unexpectedly");
+        };
+        match tokio::time::timeout(Duration::from_secs(3), task).await {
+            Ok(Ok(()))
+                if self.handle.health.snapshot()["staging_delivery"]["state"] == "stopped" =>
+            {
+                Ok(())
+            }
+            Ok(Ok(())) => Err("staging delivery worker stopped unexpectedly"),
+            Ok(Err(_)) => {
+                set_state(&self.handle.health.delivery_state, "worker_error");
+                Err("staging delivery worker failed")
+            }
+            Err(_) => {
+                set_state(&self.handle.health.delivery_state, "shutdown_pending");
+                Err("staging delivery shutdown remains pending")
+            }
         }
+    }
+}
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        self.handle.active.store(false, Ordering::Relaxed);
+        let _ = self.stop.send(true);
     }
 }

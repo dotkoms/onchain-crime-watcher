@@ -43,7 +43,7 @@ Production delivery remains off while provider coverage, billing, Discord accept
 | Volume analysis | Create-anchored buckets, trimmed baselines, participation and concentration gates, and a labelled cold-baseline path. Thresholds remain unvalidated priors. |
 | Recorded captures | Bounded, compressed, checksummed capture with loss accounting, checked shutdown, and read-only diagnostic inspection/replay. |
 | Guarded staging delivery | Expiring candidates, delivery budgets, durable reservations, and no automatic retry after an ambiguous POST. |
-| Bounded recovery | Optional free-only reconnects, a finite retry budget, transport pong checks, and separate application-liveness tracking. |
+| Bounded recovery | Optional free-only reconnects, finite retry budgets, transport/application liveness, and bounded pipeline panic recovery. |
 | Local visibility | Loopback health endpoint, spend accounting, connection generations, and failure counters. |
 
 ## Quickstart
@@ -126,7 +126,7 @@ Receive time anchors observation. Unknown amounts stay unresolved, capture loss 
 | Area | Where it stands |
 | --- | --- |
 | Collector, volume core, staging sender | Implemented; live provider and Discord acceptance remain pending. |
-| Reliability | First bounded-recovery slice implemented. Independent probes, gap healing, supervision, and heartbeat/checkpoint work remain. |
+| Reliability | Bounded transport recovery and current-stage crash containment implemented. Independent probes, gap healing, full task topology, and heartbeat/checkpoint work remain. |
 | Replay and validation | Diagnostic capture inspection exists. Complete decision replay, backtests, and production evidence gates remain. |
 | Community takeovers and bundles | Planned. Feed claims and incomplete launch coverage must be stated explicitly. |
 | Wallet discovery and exits | Planned. Requires observed positions, cost basis, and coverage-aware accounting. |
@@ -141,7 +141,7 @@ The full signal definitions and limits live in [SCOPE.md](SCOPE.md). The [backte
 | [Real-data workflow](docs/real-data.md) | [Volume signals](docs/volume.md) |
 | [Collector setup](docs/m1a.md) | [Feed and coverage](docs/feed.md) |
 | [Staging delivery](docs/staging-delivery.md) | [Delivery contract](docs/delivery.md) |
-| [Recovery runbook](docs/recovery.md) · [Capture shutdown](docs/shutdown.md) | [Replay and backtesting](docs/backtest.md) |
+| [Recovery](docs/recovery.md) · [Supervision](docs/supervision.md) · [Shutdown](docs/shutdown.md) | [Replay and backtesting](docs/backtest.md) |
 | [Quality constraints](CONSTRAINTS.md) | [Failover plan](docs/failover.md) |
 | [Task list](tasks/todo.md) | [References](docs/references.md) |
 

@@ -536,7 +536,7 @@ fn spawn_inner(
 /// A timed-out blocking writer continues to own its process lock until its I/O completes.
 pub(crate) async fn shutdown(
     tap: Tap,
-    writer: tokio::task::JoinHandle<()>,
+    writer: impl std::future::Future<Output = Result<(), tokio::task::JoinError>>,
     health: &Health,
     deadline: Duration,
 ) -> Result<(), &'static str> {

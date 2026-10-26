@@ -76,10 +76,12 @@ and heartbeat service is still pending. Source verification remains single-sourc
 ## Remaining M1c and acceptance work
 
 This is not the complete hardening milestone. Independent active-mint probes, bounded RPC healing,
-expanded mint/TTL admission policy, task-panic supervision, heartbeat/dead-man monitoring and
+expanded mint/TTL admission policy, the full task topology, heartbeat/dead-man monitoring and
 checkpoint/delta storage remain to be implemented. Measured saturation, real provider disconnect
 behavior, post-migration coverage, billing/teardown exposure and a real staging alert are still
-acceptance work. There is no new unattended deployment or automatic application restart loop.
+acceptance work. There is no unattended deployment or automatic process restart loop. Current-stage
+[panic containment and worker monitoring](supervision.md) use a separate bounded policy; a
+pipeline panic never restores paid subscriptions or transport retry credits.
 
 The WebSocket control-frame behavior was checked against the locked Tungstenite 0.27 source;
 timer intervals use Tokio 1.54 with missed ticks skipped. The provider's

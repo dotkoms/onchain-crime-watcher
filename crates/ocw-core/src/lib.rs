@@ -4,6 +4,8 @@ pub mod config;
 pub mod feed;
 pub mod health;
 mod outage;
+pub mod replay;
 mod session;
 pub mod spend;
 pub mod storage;
+pub mod volume;

@@ -42,3 +42,14 @@ Live acceptance above is deliberately deferred at the user's request, not marked
 - [x] Push bounded recovery review branch (`codex/bounded-recovery`).
 
 Independent probing/heal, full task supervision and real staging acceptance remain pending.
+
+## Capture shutdown integrity
+
+- [x] Reproduce capture I/O failure incorrectly returning successful collection.
+- [x] One deadline for final loss-marker admission and blocking writer completion.
+- [x] Propagate writer failure/panic/timeout and expose capture shutdown outcome.
+- [x] Preserve data-directory ownership through capture work after cancelled joins.
+- [x] Fault tests and runbook; complete locked checks before committing.
+
+Full task supervision, delivery shutdown guarantees, heartbeat/dead-man monitoring, independent
+probing/heal and real external acceptance remain pending.

@@ -61,6 +61,7 @@ fn fixture_runs_through_capture_decoder_and_health_without_live_credentials() {
     assert_eq!(result["feed"]["duplicates"], 1);
     assert_eq!(result["feed"]["decode_errors"], 1);
     assert_eq!(result["capture"]["state"], "sealed");
+    assert_eq!(result["capture"]["shutdown"], "complete");
     assert_eq!(result["paid"]["billable_received"], 0);
     let capture = dir.path().join("data/capture");
     let mut frames = Vec::new();
@@ -79,6 +80,32 @@ fn fixture_runs_through_capture_decoder_and_health_without_live_credentials() {
         }
     }
     assert_eq!(frames, raw.as_bytes());
+}
+
+#[test]
+fn capture_io_failure_exits_unsuccessfully_without_exposing_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let data = dir.path().join("data");
+    ocw_core::storage::private_dir(&data).unwrap();
+    fs::write(data.join("capture"), b"operator file").unwrap();
+    let fixture = dir.path().join("empty.jsonl");
+    fs::write(&fixture, b"").unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_ocw"))
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--fixture",
+            fixture.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(result.stderr).unwrap().trim(),
+        "ocw: capture writer failed; shutdown incomplete"
+    );
+    assert_eq!(fs::read(data.join("capture")).unwrap(), b"operator file");
 }
 
 #[test]

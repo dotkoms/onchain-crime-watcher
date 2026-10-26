@@ -41,7 +41,7 @@ Production delivery remains off while provider coverage, billing, Discord accept
 | Real-event collection | One PumpPortal socket; free create/migration events and an opt-in paid observation of one mint. |
 | Exact amounts | Integer raw-unit decoding, bounded deduplication, and explicit accounting for unresolved SOL amounts. |
 | Volume analysis | Create-anchored buckets, trimmed baselines, participation and concentration gates, and a labelled cold-baseline path. Thresholds remain unvalidated priors. |
-| Recorded captures | Bounded, compressed, checksummed capture with loss accounting and read-only diagnostic inspection/replay. |
+| Recorded captures | Bounded, compressed, checksummed capture with loss accounting, checked shutdown, and read-only diagnostic inspection/replay. |
 | Guarded staging delivery | Expiring candidates, delivery budgets, durable reservations, and no automatic retry after an ambiguous POST. |
 | Bounded recovery | Optional free-only reconnects, a finite retry budget, transport pong checks, and separate application-liveness tracking. |
 | Local visibility | Loopback health endpoint, spend accounting, connection generations, and failure counters. |
@@ -141,7 +141,7 @@ The full signal definitions and limits live in [SCOPE.md](SCOPE.md). The [backte
 | [Real-data workflow](docs/real-data.md) | [Volume signals](docs/volume.md) |
 | [Collector setup](docs/m1a.md) | [Feed and coverage](docs/feed.md) |
 | [Staging delivery](docs/staging-delivery.md) | [Delivery contract](docs/delivery.md) |
-| [Recovery runbook](docs/recovery.md) | [Replay and backtesting](docs/backtest.md) |
+| [Recovery runbook](docs/recovery.md) · [Capture shutdown](docs/shutdown.md) | [Replay and backtesting](docs/backtest.md) |
 | [Quality constraints](CONSTRAINTS.md) | [Failover plan](docs/failover.md) |
 | [Task list](tasks/todo.md) | [References](docs/references.md) |
 

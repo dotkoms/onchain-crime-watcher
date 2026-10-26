@@ -86,3 +86,17 @@ independent reliability slice; no provider connection, real webhook POST or demo
 This is not the full M1c supervisor/probe/heal milestone. Three-mint independent probes, RPC gap
 healing, task-panic supervision, heartbeat and storage checkpoints remain separate. Quiet-market
 or application-stall suspicion never fabricates a gap or heals missing data in this slice.
+
+## Capture shutdown integrity (next M1c slice)
+
+Close capture admission and bound the final gap enqueue plus writer join with one five-second
+async deadline. A writer I/O error, panic, or missed deadline must not return a successful
+collector result. Keep capture loss/cap degradation distinct from flush success. The capture
+worker must retain the data-directory lock through all pending writes, including after its
+caller is cancelled or times out. Expose a separate shutdown outcome in local health; a
+pre-flush capture record cannot certify a completed disk flush.
+
+Prove real directory I/O failure, normal sealed capture, a saturated unconsumed queue, worker
+panic, and lock retention during a timed-out/cancelled await. Then run the complete locked
+checks and document OS/runtime shutdown limits. No new provider, webhook or demo inputs.
+Full task restart supervision and the rest of M1c remain separate.

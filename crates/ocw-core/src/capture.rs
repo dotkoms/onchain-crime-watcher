@@ -1,7 +1,7 @@
 use crate::{
     config::CaptureConfig,
     health::{Health, inc, set, set_state},
-    storage::{atomic_write, new_private, private_dir},
+    storage::{ProcessLock, atomic_write, new_private, private_dir},
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -397,8 +397,28 @@ pub fn spawn(
     cfg: CaptureConfig,
     health: Arc<Health>,
 ) -> (Tap, tokio::task::JoinHandle<()>) {
+    spawn_inner(root, cfg, health, None)
+}
+
+pub(crate) fn spawn_owned(
+    root: PathBuf,
+    cfg: CaptureConfig,
+    health: Arc<Health>,
+    ownership: Arc<ProcessLock>,
+) -> (Tap, tokio::task::JoinHandle<()>) {
+    spawn_inner(root, cfg, health, Some(ownership))
+}
+
+fn spawn_inner(
+    root: PathBuf,
+    cfg: CaptureConfig,
+    health: Arc<Health>,
+    ownership: Option<Arc<ProcessLock>>,
+) -> (Tap, tokio::task::JoinHandle<()>) {
     let (tap, mut rx) = channel(cfg.queue_capacity, health.clone());
     let task = tokio::task::spawn_blocking(move || {
+        // Blocking I/O cannot be aborted. Keep exclusive ownership even if the caller leaves.
+        let _ownership = ownership;
         let mut in_progress = false;
         let result = (|| -> io::Result<()> {
             // A pre-existing capture directory may contain operator files; never chmod or delete them.
@@ -512,9 +532,151 @@ pub fn spawn(
     (tap, task)
 }
 
+/// One deadline includes both the final loss marker enqueue and the disk worker join.
+/// A timed-out blocking writer continues to own its process lock until its I/O completes.
+pub(crate) async fn shutdown(
+    tap: Tap,
+    writer: tokio::task::JoinHandle<()>,
+    health: &Health,
+    deadline: Duration,
+) -> Result<(), &'static str> {
+    set_state(&health.capture_shutdown, "draining");
+    let joined = tokio::time::timeout(deadline, async move {
+        tap.finish().await;
+        writer.await
+    })
+    .await;
+    match joined {
+        Ok(Ok(())) if health.snapshot()["capture"]["state"] != "error" => {
+            set_state(&health.capture_shutdown, "complete");
+            Ok(())
+        }
+        Ok(_) => {
+            set_state(&health.capture_state, "error");
+            set_state(&health.capture_shutdown, "failed");
+            Err("capture writer failed; shutdown incomplete")
+        }
+        Err(_) => {
+            set_state(&health.capture_shutdown, "pending");
+            Err("capture shutdown deadline exceeded; disk work may remain pending")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_deadline_includes_a_full_queue_with_a_pending_loss_marker() {
+        let health = Arc::new(Health::default());
+        let (mut tap, rx) = channel(1, health.clone());
+        for seq in 1..=2 {
+            tap.record(Record::frame(seq, "test", 0, seq, seq, Bytes::new()));
+        }
+        // Keep the receiver open but unable to drain, as with a stalled disk writer.
+        let writer = tokio::spawn(std::future::pending());
+        let abort = writer.abort_handle();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            shutdown(tap, writer, &health, Duration::from_millis(20)),
+        )
+        .await;
+        abort.abort();
+        drop(rx);
+        assert_eq!(
+            outcome.unwrap(),
+            Err("capture shutdown deadline exceeded; disk work may remain pending")
+        );
+        assert_eq!(health.snapshot()["capture"]["shutdown"], "pending");
+        assert_eq!(health.snapshot()["capture"]["dropped_records"], 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_a_writer_panic_as_failure() {
+        let health = Arc::new(Health::default());
+        let (tap, rx) = channel(1, health.clone());
+        let writer = tokio::spawn(async move {
+            drop(rx);
+            panic!("isolated test worker failure");
+        });
+        assert_eq!(
+            shutdown(tap, writer, &health, Duration::from_secs(1)).await,
+            Err("capture writer failed; shutdown incomplete")
+        );
+        assert_eq!(health.snapshot()["capture"]["shutdown"], "failed");
+        assert_eq!(health.snapshot()["capture"]["state"], "error");
+    }
+
+    #[tokio::test]
+    async fn cancelled_writer_join_retains_ownership_until_capture_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let ownership = Arc::new(ProcessLock::acquire(&data).unwrap());
+        let health = Arc::new(Health::default());
+        let (tap, mut writer) = spawn_owned(
+            data.join("capture"),
+            CaptureConfig {
+                min_free_bytes: 0,
+                ..CaptureConfig::default()
+            },
+            health.clone(),
+            ownership.clone(),
+        );
+        drop(ownership);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while health.snapshot()["capture"]["state"] != "writing" {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // The real blocking worker is started and awaits more capture records.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut writer)
+                .await
+                .is_err()
+        );
+        writer.abort();
+        let held = ProcessLock::acquire(&data).is_err();
+        drop(tap);
+        tokio::time::timeout(Duration::from_secs(2), writer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(held, "pending capture work released collector ownership");
+        assert!(ProcessLock::acquire(&data).is_ok());
+    }
+
+    #[tokio::test]
+    async fn shutdown_seals_real_capture_and_reports_flush_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("capture");
+        let health = Arc::new(Health::default());
+        let (mut tap, writer) = spawn(
+            root.clone(),
+            CaptureConfig {
+                min_free_bytes: 0,
+                ..CaptureConfig::default()
+            },
+            health.clone(),
+        );
+        let record = Record::frame(1, "test", 0, 1, 2, Bytes::from_static(b"exact bytes"));
+        tap.record(record.clone());
+        shutdown(tap, writer, &health, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(health.snapshot()["capture"]["shutdown"], "complete");
+        assert_eq!(health.snapshot()["capture"]["state"], "sealed");
+        let path = root.join("day-0/boot-test-1.ocwcap");
+        let records = read_segment(&path).unwrap();
+        assert_eq!(records.records, vec![record]);
+        assert!(!records.torn_tail);
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(path.with_extension("json")).unwrap()).unwrap();
+        assert_eq!(manifest["closed"], true);
+    }
+
     #[test]
     fn a_real_io_error_is_not_a_torn_tail_that_recovery_may_truncate() {
         struct Broken {

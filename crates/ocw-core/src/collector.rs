@@ -293,6 +293,7 @@ async fn run_inner(
     set_state(&health.application_state, "not_started");
     set_state(&health.last_failure, "none");
     set_state(&health.feed_state, "starting");
+    set_state(&health.capture_shutdown, "not_requested");
     set(&health.volume_enabled, u64::from(options.preview_volume));
     let global_pause = Arc::new(Pause::default());
     let boot = format!("{:x}{:x}", wall_ms(), std::process::id());
@@ -330,10 +331,11 @@ async fn run_inner(
             }
         }
     }));
-    let (tap, writer) = capture::spawn(
+    let (tap, writer) = capture::spawn_owned(
         config.data_dir.join("capture"),
         config.capture.clone(),
         health.clone(),
+        lock.clone(),
     );
     let mut pipeline = Pipeline {
         decoder: Decoder::new(config.feed.dedup_capacity, config.feed.dedup_window_ms),
@@ -402,17 +404,18 @@ async fn run_inner(
             },
         );
     }
-    pipeline.control("shutdown", json!({"clean":result.is_ok()}));
-    pipeline.tap.finish().await;
-    let writer_result = tokio::time::timeout(Duration::from_secs(5), writer).await;
-    if !matches!(writer_result, Ok(Ok(()))) {
-        set_state(&health.capture_state, "error");
-    }
+    pipeline.control(
+        "shutdown",
+        json!({"operation_clean":result.is_ok(),"capture_flush":"pending"}),
+    );
+    let capture_result =
+        capture::shutdown(pipeline.tap, writer, &health, Duration::from_secs(5)).await;
     let _ = stop_server.send(true);
     if !server_done {
         let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
     }
     result?;
+    capture_result?;
     Ok(health.snapshot())
 }
 

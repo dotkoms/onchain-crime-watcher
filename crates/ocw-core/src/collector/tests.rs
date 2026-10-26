@@ -138,3 +138,39 @@ async fn health_endpoint_reports_counts_without_credentials() {
     stop.send(()).unwrap();
     task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn capture_io_failure_is_not_a_successful_collector_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    crate::storage::private_dir(&data).unwrap();
+    // A regular file at the capture directory is a real, reproducible I/O failure.
+    std::fs::write(data.join("capture"), b"operator file").unwrap();
+    let path = dir.path().join("empty.jsonl");
+    std::fs::write(&path, b"").unwrap();
+    let config = Config {
+        data_dir: data.clone(),
+        health_bind: "127.0.0.1:0".parse().unwrap(),
+        ..Config::default()
+    };
+    let result = run_inner(
+        config,
+        Options {
+            fixture: Some(path),
+            ..Options::default()
+        },
+        Secrets::default(),
+        Url::parse("ws://127.0.0.1:1").unwrap(),
+        std::future::pending(),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        "capture writer failed; shutdown incomplete"
+    );
+    assert_eq!(
+        std::fs::read(data.join("capture")).unwrap(),
+        b"operator file"
+    );
+    assert!(ProcessLock::acquire(&data).is_ok());
+}

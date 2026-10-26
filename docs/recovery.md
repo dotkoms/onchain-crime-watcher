@@ -57,9 +57,10 @@ rules. No missing trades, launches or gap-heal events are generated.
 
 A durable spend-reservation worker retains process ownership even when its awaiting future is
 cancelled. A replacement collector cannot acquire the data directory until that writer finishes.
-The same rule already applies to the staging receipt worker. Normal shutdown and cancellation
-are bounded by existing task joins; hung OS disk operations can still require hard process
-supervision and must not be described as a hard wall-clock shutdown guarantee.
+The same rule applies to the staging receipt and capture workers. [Capture shutdown](shutdown.md)
+uses one async deadline for final loss-marker admission and disk completion, and returns an error
+on I/O failure, panic or timeout. Hung OS disk operations still require hard process supervision;
+the async deadline is not a hard wall-clock process shutdown guarantee.
 
 ## Diagnostics
 

@@ -440,6 +440,7 @@ fn spawn_inner(
             let mut last_sync = Instant::now();
             set_state(&health.capture_state, "writing");
             loop {
+                health.pulse(&health.capture_tick_ms);
                 let record = match rx.try_recv() {
                     Ok(r) => r,
                     Err(mpsc::error::TryRecvError::Empty) => {

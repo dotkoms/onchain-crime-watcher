@@ -42,6 +42,7 @@ pub(super) async fn run(
     };
     let mut paused = Instant::now();
     loop {
+        health.pulse(&health.delivery_tick_ms);
         if *stop.borrow() {
             break;
         }

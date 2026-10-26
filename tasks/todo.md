@@ -78,3 +78,15 @@ checkpoint/delta storage, saturation measurements and real acceptance remain pen
 
 Live accounts, credentials, real historical capture collection and empirical acceptance are
 separate from implementation and are not marked complete by local tests.
+
+Reliability foundations (increment within the requested reliability step):
+
+- [x] Bounded checksum-chained normalized journal, durable prefix and explicit restart/loss gaps.
+- [x] Independent progress clocks for history, capture, delivery and monitoring workers.
+- [x] Deterministic bounded automatic watch admission on the shared single paid socket.
+- [x] Bounded read-only RPC transport and strict native Pump curve event decoding library.
+- [ ] Wire independent three-mint probes and bounded chain healing into the collector.
+- [ ] Complete family state checkpoints and full decision replay before claiming coverage recovery.
+
+See [history and watch runbook](../docs/history.md). No live provider or Discord acceptance
+was performed for these foundations; no deployment was created.

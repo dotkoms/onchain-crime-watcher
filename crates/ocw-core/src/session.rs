@@ -52,6 +52,7 @@ impl Fault {
 enum End {
     Budget,
     Window,
+    AdmissionCap,
     Failure(Fault),
 }
 struct Exit {
@@ -220,6 +221,7 @@ pub(crate) async fn live(
                 inc(&pipeline.health.budget_stops);
                 set_state(&pipeline.health.paid_state, "exhausted");
             }
+            End::AdmissionCap => set_state(&pipeline.health.paid_state, "admission_cap"),
             End::Window => set_state(&pipeline.health.paid_state, "window_ended"),
         }
         if !paid {
@@ -289,7 +291,18 @@ async fn one(
         }
         pipeline.control("subscription", command);
     }
-    if budget.is_some() {
+    let mut planner = if budget.is_some() && config.feed.auto_watch {
+        match crate::watch::Planner::new(config.watch.clone()) {
+            Ok(planner) => Some(planner),
+            Err(_) => return Exit::failed(Fault::Protocol),
+        }
+    } else {
+        None
+    };
+    if planner.is_some() {
+        set_state(&pipeline.health.paid_state, "observing_auto");
+    }
+    if budget.is_some() && planner.is_none() {
         let Some(mint) = &config.feed.mint else {
             return Exit::failed(Fault::Protocol);
         };
@@ -336,10 +349,18 @@ async fn one(
         tokio::select! {biased;
             _=tokio::time::sleep_until(pong_deadline.unwrap_or(opened)),if pong_deadline.is_some()=>break End::Failure(Fault::Pong),
             _=tokio::time::sleep_until(last_receive+Duration::from_millis(config.recovery.transport_idle_ms))=>break End::Failure(Fault::Idle),
-            _=tokio::time::sleep_until(expires),if budget.is_some()=>break End::Window,
+            _=tokio::time::sleep_until(expires),if budget.is_some() && planner.is_none()=>break End::Window,
             _=tick.tick()=>{
                 if observe_application(&mut app,pipeline,elapsed_ms(opened)) {healthy_since=Instant::now();}
                 pipeline.health.pulse(&pipeline.health.pipeline_tick_ms);
+                if let Some(planner) = &mut planner {
+                    let now = pipeline.now_ms();
+                    let actions = planner.reconcile(now);
+                    if !apply_actions(actions, pipeline, &mut socket, now, io_timeout).await {
+                        break End::Failure(Fault::Write);
+                    }
+                    if planner.exhausted { break End::AdmissionCap; }
+                }
                 pipeline.tick_volume();
             },
             _=ping.tick()=>{
@@ -363,7 +384,32 @@ async fn one(
                             if let Some(b)=&mut budget {b.credits=b.credits.saturating_sub(1);}
                         }
                         let creates=value(&pipeline.health.creates);
-                        pipeline.ingest(bytes);
+                        if let Some(planner) = &mut planner {
+                            if let Some(stamp) = pipeline.receive(&bytes) {
+                                let parsed: Option<serde_json::Value> = serde_json::from_slice(&bytes).ok();
+                                let kind = parsed.as_ref().and_then(|v|v["txType"].as_str());
+                                let mint = parsed.as_ref().and_then(|v|v["mint"].as_str())
+                                    .and_then(|s|crate::feed::key::<32>(s).ok());
+                                let mut actions = planner.reconcile(stamp.now_ms);
+                                if kind == Some("create") && let Some(mint) = mint { actions.extend(planner.create(mint,stamp.now_ms)); }
+                                // Membership is decided before decoding; stale frames cannot mutate
+                                // reserve caches. Raw frames were already captured above.
+                                let active = mint.is_some_and(|key|planner.contains(&key));
+                                prepare_actions(&actions,pipeline,stamp.now_ms);
+                                if matches!(kind,Some("buy"|"sell")) && !active {
+                                    pipeline.discard_received(stamp,"inactive_subscription");
+                                } else {
+                                    pipeline.ingest_received(bytes,stamp,active);
+                                    if let Some((mint,lamports)) = pipeline.last_trade {
+                                        planner.trade(&mint,lamports,stamp.now_ms);
+                                    }
+                                }
+                                if !send_actions(actions,pipeline,&mut socket,io_timeout).await {
+                                    break End::Failure(Fault::Write);
+                                }
+                                if planner.exhausted { break End::AdmissionCap; }
+                            }
+                        } else { pipeline.ingest(bytes); }
                         if value(&pipeline.health.creates)>creates {
                             let first=!app.seen();
                             let recovered=app.observe(elapsed_ms(opened));
@@ -396,7 +442,7 @@ async fn one(
     };
     set_state(&pipeline.health.feed_state, "closing");
     let _ = timeout(Duration::from_secs(1), socket.close(None)).await;
-    pipeline.control("session_close",serde_json::json!({"reason":match end {End::Budget=>"budget",End::Window=>"window",End::Failure(fault)=>fault.label()}}));
+    pipeline.control("session_close",serde_json::json!({"reason":match end {End::Budget=>"budget",End::Window=>"window",End::AdmissionCap=>"admission_cap",End::Failure(fault)=>fault.label()}}));
     Exit { end, healthy_ms }
 }
 fn elapsed_ms(opened: Instant) -> u64 {
@@ -448,3 +494,62 @@ fn billable(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+fn prepare_actions(actions: &[crate::watch::Action], pipeline: &mut Pipeline, now: u64) {
+    for action in actions {
+        match *action {
+            crate::watch::Action::Subscribe {
+                mint,
+                created_ms,
+                partial,
+            } => pipeline.attach_mint(mint, created_ms, now, partial),
+            crate::watch::Action::Unsubscribe(mint) => pipeline.forget_mint(&mint),
+        }
+    }
+}
+async fn apply_actions(
+    actions: Vec<crate::watch::Action>,
+    pipeline: &mut Pipeline,
+    socket: &mut Socket,
+    now: u64,
+    deadline: Duration,
+) -> bool {
+    prepare_actions(&actions, pipeline, now);
+    send_actions(actions, pipeline, socket, deadline).await
+}
+async fn send_actions(
+    actions: Vec<crate::watch::Action>,
+    pipeline: &mut Pipeline,
+    socket: &mut Socket,
+    deadline: Duration,
+) -> bool {
+    for action in actions {
+        let (method, mint) = match action {
+            crate::watch::Action::Subscribe {
+                mint,
+                created_ms,
+                partial,
+            } => {
+                pipeline.control("watch_admitted",serde_json::json!({"mint":bs58::encode(mint).into_string(),"observed_create_ms":created_ms,"partial":partial}));
+                ("subscribeTokenTrade", mint)
+            }
+            crate::watch::Action::Unsubscribe(mint) => ("unsubscribeTokenTrade", mint),
+        };
+        let command =
+            serde_json::json!({"method":method,"keys":[bs58::encode(mint).into_string()]});
+        if !matches!(
+            timeout(
+                deadline,
+                socket.send(Message::Text(command.to_string().into()))
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            return false;
+        }
+        pipeline.control("subscription", command);
+    }
+    true
+}

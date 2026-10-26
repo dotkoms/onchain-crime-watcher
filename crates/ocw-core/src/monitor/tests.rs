@@ -231,3 +231,32 @@ fn monitor_config_requires_opt_in_and_a_valid_status_channel() {
     }
     assert!(crate::config::Config::parse("[monitor]\nenabled=true").is_ok());
 }
+
+#[test]
+fn a_responsive_collector_does_not_hide_a_stalled_disk_worker() {
+    let health = Health::default();
+    set_state(&health.feed_state, "connected");
+    set_state(&health.application_state, "observed");
+    set(&health.root_tick_ms, 5100);
+    set(&health.pipeline_tick_ms, 5100);
+    set(&health.monitor_stall_ms, 5000);
+    set_state(&health.history_state, "recording");
+    set(&health.history_tick_ms, 100);
+    assert!(
+        health.operational_at(Some(5100))["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("history_stalled"))
+    );
+    set(&health.history_tick_ms, 5100);
+    set_state(&health.capture_state, "writing");
+    set(&health.capture_tick_ms, 100);
+    assert!(
+        health.operational_at(Some(5100))["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("capture_stalled"))
+    );
+    set(&health.capture_tick_ms, 5100);
+    assert_eq!(health.operational_at(Some(5100))["operational"], true);
+}

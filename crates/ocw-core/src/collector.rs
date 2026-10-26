@@ -88,6 +88,12 @@ pub fn wall_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct FrameStamp {
+    pub now_ms: u64,
+    pub input_seq: u64,
+    pub wall_ms: u64,
+}
 pub(crate) struct Pipeline {
     pub decoder: Decoder,
     pub health: Arc<Health>,
@@ -100,28 +106,47 @@ pub(crate) struct Pipeline {
     sensitive: Option<String>,
     volume: Option<Engine>,
     delivery: Option<delivery::Handle>,
+    history: Option<crate::history::Handle>,
+    pub last_trade: Option<([u8; 32], u64)>,
 }
 impl Pipeline {
-    fn record(&mut self, kind: &str, payload: Bytes) {
+    fn record(&mut self, kind: &str, payload: Bytes) -> FrameStamp {
         self.seq += 1;
+        let ns: u64 = self
+            .start
+            .elapsed()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let wall = wall_ms();
         self.tap.record(Record::control(
             self.seq,
             &self.boot,
             self.generation,
-            self.start
-                .elapsed()
-                .as_nanos()
-                .try_into()
-                .unwrap_or(u64::MAX),
-            wall_ms(),
+            ns,
+            wall,
             kind,
             payload,
         ));
+        FrameStamp {
+            now_ms: ns / 1_000_000,
+            input_seq: self.seq,
+            wall_ms: wall,
+        }
     }
     pub(crate) fn control(&mut self, kind: &str, payload: Value) {
+        if let Some(history) = &self.history {
+            history.record(kind, payload.clone());
+        }
         self.record(kind, Bytes::from(payload.to_string()));
     }
     pub(crate) fn ingest(&mut self, bytes: Bytes) {
+        if let Some(stamp) = self.receive(&bytes) {
+            self.ingest_received(bytes, stamp, true);
+        }
+    }
+    pub(crate) fn receive(&mut self, bytes: &Bytes) -> Option<FrameStamp> {
+        self.last_trade = None;
         inc(&self.health.frames);
         set(&self.health.last_frame_ms, wall_ms());
         if self
@@ -135,17 +160,35 @@ impl Pipeline {
                 engine.invalidate();
             }
             self.control("redacted_frame", json!({"reason":"credential_echo"}));
-            return;
+            return None;
         }
-        self.record("frame", bytes.clone());
-        let now = self
-            .start
-            .elapsed()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
+        Some(self.record("frame", bytes.clone()))
+    }
+    pub(crate) fn ingest_received(&mut self, bytes: Bytes, stamp: FrameStamp, allow_create: bool) {
+        let now = stamp.now_ms;
         match self.decoder.decode(&bytes, now) {
             Ok(event) => {
+                if let Event::Trade(trade) = &event {
+                    self.last_trade = Some((trade.mint, trade.sol_lamports));
+                }
+                if let Some(history) = &self.history {
+                    let data = match &event {
+                        Event::Create(mint) => {
+                            let raw: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                            json!({"type":"create","mint":bs58::encode(mint).into_string(),"bonding_curve":raw.get("bondingCurveKey").and_then(Value::as_str).filter(|v|crate::feed::key::<32>(v).is_ok()),"creator":raw.get("traderPublicKey").and_then(Value::as_str).filter(|v|crate::feed::key::<32>(v).is_ok())})
+                        }
+                        Event::Trade(trade) => {
+                            json!({"type":"trade","mint":bs58::encode(trade.mint).into_string(),"trader":bs58::encode(trade.trader).into_string(),"signature":bs58::encode(trade.signature).into_string(),"side":if trade.side==crate::feed::Side::Buy {"buy"}else{"sell"},"tokens_raw":trade.token_amount.to_string(),"sol_lamports":trade.sol_lamports.to_string(),"sol_source":match trade.sol_source {crate::feed::SolSource::Payload=>"payload",crate::feed::SolSource::ReserveDelta=>"reserve_delta",crate::feed::SolSource::Instruction=>"instruction"}})
+                        }
+                        Event::Migration(mint) => {
+                            json!({"type":"migration","mint":bs58::encode(mint).into_string()})
+                        }
+                        Event::Duplicate => json!({"type":"duplicate"}),
+                        Event::Unresolved => json!({"type":"unresolved"}),
+                        Event::Other => json!({"type":"other"}),
+                    };
+                    history.record("observation",json!({"input_seq":stamp.input_seq,"received_wall_ms":stamp.wall_ms,"mono_ms":now,"source":"pumpportal","generation":self.generation,"event":data}));
+                }
                 match &event {
                     Event::Trade(_) => inc(&self.health.trades),
                     Event::Create(_) => inc(&self.health.creates),
@@ -155,9 +198,12 @@ impl Pipeline {
                     Event::Other => {}
                 }
                 if let Some(engine) = &mut self.volume {
-                    let decisions = engine
-                        .on_event(event, now)
-                        .expect("monotonic receive clock");
+                    let decisions = if matches!(event, Event::Create(_)) && !allow_create {
+                        engine.advance(now)
+                    } else {
+                        engine.on_event(event, now)
+                    }
+                    .expect("monotonic receive clock");
                     self.emit_volume(decisions, now);
                 }
             }
@@ -173,6 +219,34 @@ impl Pipeline {
             &self.health.unusable_reserves,
             self.decoder.unusable_reserves(),
         );
+    }
+    pub(crate) fn discard_received(&mut self, stamp: FrameStamp, reason: &str) {
+        self.control(
+            "discarded_frame",
+            json!({"input_seq":stamp.input_seq,"reason":reason}),
+        );
+        if let Some(engine) = &mut self.volume {
+            let decisions = engine
+                .advance(stamp.now_ms)
+                .expect("monotonic receive clock");
+            self.emit_volume(decisions, stamp.now_ms);
+        }
+    }
+    pub(crate) fn forget_mint(&mut self, mint: &[u8; 32]) {
+        if let Some(engine) = &mut self.volume {
+            engine.forget(mint);
+        }
+    }
+    pub(crate) fn attach_mint(
+        &mut self,
+        mint: [u8; 32],
+        created: Option<u64>,
+        now: u64,
+        partial: bool,
+    ) {
+        if let (Some(engine), Some(created)) = (&mut self.volume, created) {
+            engine.attach_observed(mint, created, now, partial);
+        }
     }
     fn volume_health(&self) {
         if let Some(engine) = &self.volume {
@@ -202,6 +276,13 @@ impl Pipeline {
                 println!("{event}");
             }
         }
+    }
+    pub(crate) fn now_ms(&self) -> u64 {
+        self.start
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
     }
     pub(crate) fn tick_volume(&mut self) {
         let now = self
@@ -274,12 +355,17 @@ async fn run_inner(
         return Err("volume previews require live mode or recorded capture replay".into());
     }
     if options.paid
-        && (options.fixture.is_some() || config.feed.mint.is_none() || secrets.api_key.is_none())
+        && (options.fixture.is_some()
+            || (config.feed.mint.is_none() && !config.feed.auto_watch)
+            || secrets.api_key.is_none())
     {
         return Err("paid mode requires feed.mint, OCW_PUMPPORTAL_KEY, and live mode".into());
     }
     if options.fixture.is_some() && config.monitor.enabled {
         return Err("monitoring requires explicit live collection".into());
+    }
+    if options.fixture.is_some() && config.history.enabled {
+        return Err("durable history requires live operation".into());
     }
     let lock = Arc::new(
         ProcessLock::acquire(&config.data_dir)
@@ -292,6 +378,7 @@ async fn run_inner(
         .local_addr()
         .map_err(|_| "cannot read health address")?;
     let health = Arc::new(Health::default());
+    set(&health.paid_requested, u64::from(options.paid));
     set_state(&health.paid_state, "off");
     set_state(&health.transport_state, "not_started");
     set_state(&health.application_state, "not_started");
@@ -347,6 +434,24 @@ async fn run_inner(
     } else {
         None
     };
+    let mut history_runtime = if config.history.enabled {
+        Some(
+            crate::history::Runtime::start(
+                config.data_dir.join("history"),
+                boot.clone(),
+                config.history.max_bytes,
+                health.clone(),
+                lock.clone(),
+            )
+            .await?,
+        )
+    } else {
+        set_state(&health.history_state, "disabled");
+        None
+    };
+    let history = history_runtime
+        .as_ref()
+        .map(|runtime| runtime.handle.clone());
     let mut delivery_runtime = if options.staging_delivery {
         Some(
             delivery::Runtime::start(
@@ -402,6 +507,8 @@ async fn run_inner(
         sensitive: secrets.api_key.clone(),
         volume: options.preview_volume.then(|| Engine::new(256)),
         delivery,
+        history: history.clone(),
+        last_trade: None,
     };
     pipeline.control("boot",json!({"config":config,"mode":if options.fixture.is_some(){"fixture"}else{"live"},"initial_state":"cold","decoder_schema":1}));
     println!(
@@ -431,7 +538,11 @@ async fn run_inner(
         loop {
             tokio::select! {
                 result=&mut operation=>break (result,false),
-                _=scheduler_tick.tick()=>health.pulse(&health.root_tick_ms),
+                _=scheduler_tick.tick()=>{
+                    health.pulse(&health.root_tick_ms);
+                    if let Some(history)=&history {history.record("coverage_tick",json!({"coverage":"observed_subset_unverified"}));}
+                },
+                _=async {match &mut history_runtime {Some(runtime)=>runtime.completed().await,None=>std::future::pending().await}}=>supervision::red(&health,"history"),
                 _=async {
                     match &mut monitor_runtime {
                         Some(runtime)=>runtime.completed().await,
@@ -472,6 +583,11 @@ async fn run_inner(
     );
     set_state(&health.transport_state, "stopped");
     set(&health.backoff_ms, 0);
+    pipeline.history = None;
+    let history_result = match history_runtime {
+        Some(runtime) => runtime.shutdown().await,
+        None => Ok(()),
+    };
     let monitor_result = match monitor_runtime {
         Some(runtime) => runtime.shutdown().await,
         None => Ok(()),
@@ -537,6 +653,7 @@ async fn run_inner(
     }
     result?;
     monitor_result?;
+    history_result?;
     capture_result?;
     delivery_result?;
     if health.snapshot()["supervision"]["state"] == "red" {
@@ -593,6 +710,8 @@ pub(crate) fn pipeline_for_test(
             sensitive: None,
             volume: None,
             delivery: None,
+            history: None,
+            last_trade: None,
         },
         records,
     )

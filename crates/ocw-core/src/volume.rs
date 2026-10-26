@@ -203,6 +203,29 @@ impl Engine {
     pub fn stats(&self) -> &Stats {
         &self.stats
     }
+    pub(crate) fn forget(&mut self, key: &[u8; 32]) {
+        self.mints.remove(key);
+    }
+    pub(crate) fn attach_observed(&mut self, key: [u8; 32], born: u64, now: u64, partial: bool) {
+        if self.mints.contains_key(&key) || self.mints.len() >= self.capacity || born > now {
+            return;
+        }
+        let start = born + ((now - born) / BUCKET_MS) * BUCKET_MS;
+        let bucket = Bucket {
+            invalid: partial || born < now,
+            ..Bucket::default()
+        };
+        self.mints.insert(
+            key,
+            Mint {
+                born,
+                start,
+                pool: false,
+                ring: VecDeque::new(),
+                current: bucket,
+            },
+        );
+    }
     pub fn active_mints(&self) -> usize {
         self.mints.len()
     }

@@ -66,6 +66,7 @@ pub struct Health {
     pub feed_state: Mutex<&'static str>,
     pub capture_state: Mutex<&'static str>,
     pub capture_shutdown: Mutex<&'static str>,
+    pub paid_requested: AtomicU64,
     pub paid_state: Mutex<&'static str>,
     pub supervisor_state: Mutex<&'static str>,
     pub pipeline_state: Mutex<&'static str>,
@@ -88,6 +89,14 @@ pub struct Health {
     pub deadman_pings: AtomicU64,
     pub deadman_failures: AtomicU64,
     pub deadman_errors: AtomicU64,
+    pub history_state: Mutex<&'static str>,
+    pub history_written: AtomicU64,
+    pub history_durable: AtomicU64,
+    pub history_dropped: AtomicU64,
+    pub history_tick_ms: AtomicU64,
+    pub capture_tick_ms: AtomicU64,
+    pub delivery_tick_ms: AtomicU64,
+    pub monitor_tick_ms: AtomicU64,
 }
 pub fn inc(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
@@ -136,6 +145,41 @@ impl Health {
                 reasons.push(label);
             }
         }
+        for (active, counter, label) in [
+            (
+                state(&self.history_state) == "recording",
+                &self.history_tick_ms,
+                "history_stalled",
+            ),
+            (
+                state(&self.capture_state) == "writing",
+                &self.capture_tick_ms,
+                "capture_stalled",
+            ),
+            (
+                value(&self.delivery_enabled) > 0,
+                &self.delivery_tick_ms,
+                "delivery_stalled",
+            ),
+            (
+                value(&self.monitor_enabled) > 0 && state(&self.monitor_worker_state) != "starting",
+                &self.monitor_tick_ms,
+                "monitor_stalled",
+            ),
+        ] {
+            let tick = value(counter);
+            if active && now.is_none_or(|now| tick == 0 || tick > now || now - tick >= limit) {
+                reasons.push(label);
+            }
+        }
+        if value(&self.paid_requested) > 0
+            && !matches!(
+                state(&self.paid_state),
+                "observing_one_mint" | "observing_auto"
+            )
+        {
+            reasons.push("trade_observation_stopped");
+        }
         if state(&self.feed_state) != "connected" {
             reasons.push("feed_unavailable");
         }
@@ -144,6 +188,9 @@ impl Health {
             "observed" | "quiet_confirmed"
         ) {
             reasons.push("application_unverified");
+        }
+        if matches!(state(&self.history_state), "error" | "overflow" | "red") {
+            reasons.push("history_degraded");
         }
         if state(&self.supervisor_state) == "red" {
             reasons.push("stage_red");
@@ -184,6 +231,7 @@ impl Health {
             "paid":{"state":state(&self.paid_state),"billable_received":value(&self.billable_received),"reserved_messages":value(&self.budget_reserved),"stops":value(&self.budget_stops),"hard_provider_cap":false},
             "volume":{"preview_enabled":value(&self.volume_enabled)>0,"active_mints":value(&self.volume_active),"evaluated_buckets":value(&self.volume_evaluated),"warmup_buckets":value(&self.volume_warmup),"fire_candidates":value(&self.volume_fire),"near_candidates":value(&self.volume_near),"unknown_mint_trades":value(&self.volume_unknown),"registry_full":value(&self.volume_full),"invalid_buckets":value(&self.volume_invalid),"delivery":if value(&self.delivery_enabled)>0 {"staging"}else{"disabled"}},
             "staging_delivery":{"enabled":value(&self.delivery_enabled)>0,"state":if value(&self.delivery_enabled)==0 {"disabled"}else{state(&self.delivery_state)},"queued":value(&self.delivery_queued),"dropped":value(&self.delivery_dropped),"expired_or_generation_changed":value(&self.delivery_expired),"budget_suppressed":value(&self.delivery_budget),"duplicates":value(&self.delivery_duplicates),"attempted":value(&self.delivery_attempted),"sent":value(&self.delivery_sent),"unknown":value(&self.delivery_unknown),"rejected":value(&self.delivery_rejected),"rate_limited":value(&self.delivery_limited)},
+            "history":{"state":state(&self.history_state),"written_seq":value(&self.history_written),"durable_seq":value(&self.history_durable),"dropped":value(&self.history_dropped)},
             "monitor":{"enabled":value(&self.monitor_enabled)>0,"discord_status_configured":value(&self.heartbeat_discord_enabled)>0,"external_deadman_configured":value(&self.deadman_enabled)>0,"state":state(&self.monitor_worker_state),"heartbeat_updates":value(&self.heartbeat_updates),"heartbeat_errors":value(&self.heartbeat_errors),"deadman_pings":value(&self.deadman_pings),"deadman_failure_signals":value(&self.deadman_failures),"deadman_errors":value(&self.deadman_errors)},
             "outage":{"sent":value(&self.outage_sent),"unknown_or_failed":value(&self.outage_unknown)}})
     }

@@ -67,6 +67,7 @@ pub(crate) fn red(health: &Health, stage: &'static str) {
         "delivery" => &health.delivery_worker_state,
         "health" => &health.health_worker_state,
         "monitor" => &health.monitor_worker_state,
+        "history" => &health.history_state,
         _ => unreachable!("fixed internal stage"),
     };
     if let Ok(mut current) = state.lock() {

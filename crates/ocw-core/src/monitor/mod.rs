@@ -150,7 +150,7 @@ async fn run(
     mut stop: watch::Receiver<bool>,
     boot: String,
 ) {
-    let origin = Instant::now();
+    let origin = *health.monitor_origin.get_or_init(Instant::now);
     let mut heartbeat = tokio::time::interval(Duration::from_secs(config.heartbeat_s));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut deadman_tick = tokio::time::interval_at(
@@ -158,6 +158,9 @@ async fn run(
         Duration::from_secs(config.deadman_s),
     );
     deadman_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut progress = tokio::time::interval(Duration::from_secs(1));
+    progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    health.pulse(&health.monitor_tick_ms);
     set_state(&health.monitor_worker_state, "running");
     loop {
         if *stop.borrow() {
@@ -165,6 +168,7 @@ async fn run(
         }
         tokio::select! { biased;
             _=stop.changed()=>break,
+            _=progress.tick()=>health.pulse(&health.monitor_tick_ms),
             _=heartbeat.tick()=> {
                 let report=health.operational();
                 println!("{}",json!({"event":"heartbeat","entry_point":"live","boot_id":boot,"uptime_s":origin.elapsed().as_secs(),"readiness":report,"health":health.snapshot()}));

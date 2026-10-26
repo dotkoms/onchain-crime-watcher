@@ -5,6 +5,8 @@ data_dir = "data"
 health_bind = "127.0.0.1:9898"
 
 [feed]
+# Opt-in automatic bounded launch watching instead of a fixed mint. Still requires --enable-paid.
+auto_watch = false
 # mint = "YOUR_ONE_MINT_BASE58_ADDRESS"
 max_frame_bytes = 65536
 dedup_capacity = 4096
@@ -55,3 +57,19 @@ deadman_s = 60
 stall_ms = 5000
 timeout_ms = 2000
 # Secrets are environment-only: OCW_DISCORD_STATUS_URL and OCW_DEADMAN_URL.
+
+# Durable normalized observations and explicit coverage gaps. No recovery makes a gap complete.
+[history]
+enabled = false
+max_bytes = 536870912
+
+# Used only with feed.auto_watch=true, --live and --enable-paid.
+[watch]
+max_subs = 20
+launch_slots = 4
+launch_s = 10
+retain_window_s = 300
+retain_min_lamports = 3000000000
+ttl_s = 1800
+keepalive_lamports = 500000000
+evict_margin_bps = 15000

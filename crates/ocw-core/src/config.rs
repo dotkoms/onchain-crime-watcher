@@ -12,6 +12,8 @@ pub struct Config {
     pub delivery: DeliveryConfig,
     pub recovery: RecoveryConfig,
     pub monitor: MonitorConfig,
+    pub history: HistoryConfig,
+    pub watch: crate::watch::Config,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -66,6 +68,7 @@ impl Default for DeliveryConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct FeedConfig {
     pub mint: Option<String>,
+    pub auto_watch: bool,
     pub max_frame_bytes: usize,
     pub dedup_capacity: usize,
     pub dedup_window_ms: u64,
@@ -101,6 +104,8 @@ impl Default for Config {
             delivery: DeliveryConfig::default(),
             recovery: RecoveryConfig::default(),
             monitor: MonitorConfig::default(),
+            history: HistoryConfig::default(),
+            watch: crate::watch::Config::default(),
         }
     }
 }
@@ -108,6 +113,7 @@ impl Default for FeedConfig {
     fn default() -> Self {
         Self {
             mint: None,
+            auto_watch: false,
             max_frame_bytes: 65_536,
             dedup_capacity: 4096,
             dedup_window_ms: 180_000,
@@ -144,6 +150,9 @@ impl Config {
         Ok(config)
     }
     pub fn validate(&self) -> Result<(), String> {
+        if !(16 * 1024 * 1024..=512 * 1024 * 1024).contains(&self.history.max_bytes) {
+            return Err("history capacity out of range".into());
+        }
         let m = &self.monitor;
         if !(60..=900).contains(&m.heartbeat_s)
             || !(30..=300).contains(&m.deadman_s)
@@ -156,6 +165,10 @@ impl Config {
             || (!m.enabled && (m.discord_status || m.deadman))
         {
             return Err("monitor limits or status channel are invalid".into());
+        }
+        self.watch.validate().map_err(str::to_string)?;
+        if self.feed.auto_watch && self.feed.mint.is_some() {
+            return Err("choose automatic watching or one manual mint".into());
         }
         let f = &self.feed;
         let c = &self.capture;
@@ -244,6 +257,21 @@ impl Default for MonitorConfig {
             deadman_s: 60,
             stall_ms: 5000,
             timeout_ms: 2000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryConfig {
+    pub enabled: bool,
+    pub max_bytes: u64,
+}
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_bytes: 512 * 1024 * 1024,
         }
     }
 }

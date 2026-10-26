@@ -377,3 +377,77 @@ fn suspected_application_liveness_suppresses_a_fresh_signal_without_fabricating_
     assert_eq!(records.try_recv().unwrap().kind, "volume_preview");
     assert!(records.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn automatic_watch_subscribes_on_the_same_socket_and_excludes_inactive_trades() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path());
+    config.feed.auto_watch = true;
+    config.gate.reservation_messages = 10;
+    crate::storage::private_dir(&config.data_dir).unwrap();
+    Ledger::initialize(
+        &config.data_dir.join("feed-spend.json"),
+        wall_ms() / 86_400_000,
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = Url::parse(&format!("ws://{}", listener.local_addr().unwrap())).unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let provider = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        assert_eq!(
+            methods(&mut socket, 2).await,
+            vec!["subscribeNewToken", "subscribeMigration"]
+        );
+        let mint = bs58::encode([1u8; 32]).into_string();
+        socket
+            .send(Message::Text(
+                json!({"txType":"create","mint":mint,"vSolInBondingCurve":30})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let command = socket.next().await.unwrap().unwrap().into_data();
+        let command: Value = serde_json::from_slice(&command).unwrap();
+        assert_eq!(command["method"], "subscribeTokenTrade");
+        assert_eq!(command["keys"][0], mint);
+        for (key, sig) in [(9u8, 1u8), (1, 2)] {
+            socket.send(Message::Text(json!({"txType":"buy","mint":bs58::encode([key;32]).into_string(),"traderPublicKey":bs58::encode([2u8;32]).into_string(),"signature":bs58::encode([sig;64]).into_string(),"tokenAmount":1,"solAmount":1,"vSolInBondingCurve":31}).to_string().into())).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stop.send(()).unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(2), socket.next()).await;
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_inner(
+            config,
+            Options {
+                paid: true,
+                preview_volume: true,
+                ..Options::default()
+            },
+            Secrets {
+                api_key: Some("unit-test-key-do-not-log".into()),
+                ..Secrets::default()
+            },
+            endpoint,
+            async {
+                let _ = stopped.await;
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    provider.await.unwrap();
+    assert_eq!(result["feed"]["trades"], 1);
+    assert_eq!(result["paid"]["billable_received"], 2);
+    assert_eq!(result["paid"]["reserved_messages"], 10);
+    let discarded = controls(dir.path(), "discarded_frame");
+    assert_eq!(discarded.len(), 1);
+    assert_eq!(discarded[0]["reason"], "inactive_subscription");
+    assert_eq!(controls(dir.path(), "watch_admitted").len(), 1);
+}

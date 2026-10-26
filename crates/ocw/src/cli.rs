@@ -31,7 +31,7 @@ fn parse() -> Result<Option<Cli>, String> {
         match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "ocw [--status]                               Waiting-for-data status (default)\nocw --replay-capture <segment.ocwcap> [--json] Recorded real frames and volume previews\nocw --config <file> --fixture <raw-JSONL>     Recorded frame inspection\nocw --live --config <file> [--run-for-secs N] [--enable-paid] [--preview-volume] [--enable-staging-delivery]\nocw --config <file> --dry | --check-config | --init-spend-ledger\nocw --inspect-capture <segment.ocwcap>\nNetworking requires --live. No sample data or generated signals are supplied.\nPaid mode requires one feed.mint, OCW_PUMPPORTAL_KEY and an explicitly initialized ledger.\nStaging delivery requires its explicit flag, OCW_DISCORD_STAGING_URL and delivery.staging_channel_id. Production delivery remains disabled."
+                    "ocw [--status]                               Waiting-for-data status (default)\nocw --replay-capture <segment.ocwcap> [--json] Recorded real frames and volume previews\nocw --config <file> --fixture <raw-JSONL>     Recorded frame inspection\nocw --live --config <file> [--run-for-secs N] [--enable-paid] [--preview-volume] [--enable-staging-delivery]\nocw --config <file> --dry | --check-config | --init-spend-ledger\nocw --inspect-capture <segment.ocwcap>\nNetworking requires --live. No sample data or generated signals are supplied.\nPaid mode requires feed.mint or feed.auto_watch, OCW_PUMPPORTAL_KEY and an explicitly initialized ledger.\nStaging delivery requires its explicit flag, OCW_DISCORD_STAGING_URL and delivery.staging_channel_id. Production delivery remains disabled."
                 );
                 return Ok(None);
             }
@@ -203,7 +203,7 @@ async fn execute(cli: Cli) -> Result<(), String> {
             json!({"method":"subscribeNewToken"}),
             json!({"method":"subscribeMigration"}),
         ];
-        if cli.paid {
+        if cli.paid && !config.feed.auto_watch {
             let mint = config
                 .feed
                 .mint
@@ -213,7 +213,7 @@ async fn execute(cli: Cli) -> Result<(), String> {
         }
         println!(
             "{}",
-            json!({"mode":"dry","subscriptions":subscriptions,"signals_enabled":false,"paid_requested":cli.paid})
+            json!({"mode":"dry","subscriptions":subscriptions,"signals_enabled":false,"paid_requested":cli.paid,"automatic_watch":cli.paid && config.feed.auto_watch,"max_subscriptions":if config.feed.auto_watch {config.watch.max_subs} else {1}})
         );
         return Ok(());
     }

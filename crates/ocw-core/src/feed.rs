@@ -70,6 +70,7 @@ pub enum Side {
 pub enum SolSource {
     Payload,
     ReserveDelta,
+    Instruction,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trade {

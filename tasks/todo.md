@@ -31,4 +31,4 @@ Live acceptance above is deliberately deferred at the user's request, not marked
 - [x] Webhook transport classification, rate limits and localhost HTTP tests.
 - [x] Explicit staging opt-in, live integration, health and safe shutdown.
 - [x] Documentation and complete local checks.
-- [ ] Push staging sender review branch.
+- [x] Push staging sender review branch (`codex/staging-discord-sender`).

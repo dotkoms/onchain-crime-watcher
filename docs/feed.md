@@ -1,6 +1,8 @@
 # Feed subsystem — design
 
-Builds M1's feed spine (`../SCOPE.md §9`). Revision 2 is the contract; every default below is PRIOR.
+Builds M1's feed spine (`../SCOPE.md §9`). Revision 6 is the contract; defaults below are PRIOR.
+M1a implements the bounded collector in `ocw-core` modules; `docs/m1a.md` records its supported
+subset. The expanded policies and module sketch below remain M1c/M2+ design, not shipped features.
 
 Related: `../SCOPE.md §4–7, §9`; `volume.md` (buckets); `delivery.md` (outages, heartbeat);
 `ranking.md` (coverage); `bundle.md` (launch record); `sources.md` (limits); `operations.md`.

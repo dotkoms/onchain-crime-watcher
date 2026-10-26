@@ -1,0 +1,26 @@
+# M1a configuration. Copy to config/local.toml for your machine.
+# Run from the repository root. data_dir must be a real private directory (0700),
+# or absent so ocw can create it. Secrets are environment-only, never TOML.
+data_dir = "data"
+health_bind = "127.0.0.1:9898"
+
+[feed]
+# mint = "YOUR_ONE_MINT_BASE58_ADDRESS"
+max_frame_bytes = 65536
+dedup_capacity = 4096
+dedup_window_ms = 180000
+connect_timeout_ms = 10000
+paid_window_s = 10
+
+[gate]
+# Current provider pricing: 1,000,000 messages/SOL. This is a LOCAL allowance.
+# Stop at 490,000 reserved messages; 10,000-message margin is measured, not guaranteed.
+daily_messages = 500000
+stop_margin_messages = 10000
+reservation_messages = 1000
+
+[capture]
+queue_capacity = 4096
+max_bytes = 2147483648
+retention_days = 14
+min_free_bytes = 2147483648

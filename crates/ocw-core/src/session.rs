@@ -608,7 +608,7 @@ fn prepare_actions(actions: &[crate::watch::Action], pipeline: &mut Pipeline, no
                 created_ms,
                 partial,
             } => pipeline.attach_mint(mint, created_ms, now, partial),
-            crate::watch::Action::Unsubscribe(mint) => pipeline.forget_mint(&mint),
+            crate::watch::Action::Unsubscribe(mint) => pipeline.forget_mint(&mint, now),
         }
     }
 }

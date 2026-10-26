@@ -99,7 +99,18 @@ Hosting preparation increment:
 - [x] SIGTERM shutdown, non-root Docker/Compose and bounded systemd templates.
 - [x] Offline checksummed snapshots, safe restore and live-start reconciliation barrier.
 - [x] Hosting, secret, persistent-storage, monitoring and rollback runbook.
-- [ ] Container build/runtime CI result and actual target-host systemd validation.
+- [x] Container image build, disconnected startup and offline preflight in CI.
+- [ ] Actual target-host systemd validation and live hosted acceptance.
 - [ ] Live staging and provider acceptance when explicitly authorized.
 
 No host, external monitor account, backup schedule or deployment was created.
+
+Recorded analysis execution increment:
+
+- [x] Record exact frame application, watch operations, timer ticks and volume reset clocks.
+- [x] Read-only cold-prefix decoder/volume replay with deterministic input/decision hashes.
+- [x] Reject missing execution evidence; preserve observed admission and exclude healed audit batches.
+- [ ] Replay controller choices, delivery admission/results and external response tapes.
+- [ ] Multi-segment/checkpoint replay and real historical train/test threshold evaluation.
+
+See [analysis replay](../docs/analysis-replay.md); this is not a complete delivery backtest.

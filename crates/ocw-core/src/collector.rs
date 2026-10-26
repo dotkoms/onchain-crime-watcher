@@ -146,11 +146,14 @@ impl Pipeline {
             wall_ms: wall,
         }
     }
-    pub(crate) fn control(&mut self, kind: &str, payload: Value) {
+    fn step(&mut self, kind: &str, payload: Value) -> FrameStamp {
         if let Some(history) = &self.history {
             history.record(kind, payload.clone());
         }
-        self.record(kind, Bytes::from(payload.to_string()));
+        self.record(kind, Bytes::from(payload.to_string()))
+    }
+    pub(crate) fn control(&mut self, kind: &str, payload: Value) {
+        self.step(kind, payload);
     }
     pub(crate) fn ingest(&mut self, bytes: Bytes) {
         if let Some(stamp) = self.receive(&bytes) {
@@ -178,6 +181,10 @@ impl Pipeline {
     }
     pub(crate) fn ingest_received(&mut self, bytes: Bytes, stamp: FrameStamp, allow_create: bool) {
         let now = stamp.now_ms;
+        self.control(
+            "frame_apply",
+            json!({"input_seq":stamp.input_seq,"apply_ms":now,"allow_create":allow_create}),
+        );
         match self.decoder.decode(&bytes, now) {
             Ok(event) => {
                 if let Event::Trade(trade) = &event {
@@ -235,7 +242,7 @@ impl Pipeline {
     pub(crate) fn discard_received(&mut self, stamp: FrameStamp, reason: &str) {
         self.control(
             "discarded_frame",
-            json!({"input_seq":stamp.input_seq,"reason":reason}),
+            json!({"input_seq":stamp.input_seq,"apply_ms":stamp.now_ms,"reason":reason}),
         );
         if let Some(engine) = &mut self.volume {
             let decisions = engine
@@ -244,7 +251,11 @@ impl Pipeline {
             self.emit_volume(decisions, stamp.now_ms);
         }
     }
-    pub(crate) fn forget_mint(&mut self, mint: &[u8; 32]) {
+    pub(crate) fn forget_mint(&mut self, mint: &[u8; 32], now: u64) {
+        self.control(
+            "watch_apply",
+            json!({"operation":"remove","mint":bs58::encode(mint).into_string(),"apply_ms":now}),
+        );
         if let Some(engine) = &mut self.volume {
             engine.forget(mint);
         }
@@ -256,6 +267,7 @@ impl Pipeline {
         now: u64,
         partial: bool,
     ) {
+        self.control("watch_apply",json!({"operation":"attach","mint":bs58::encode(mint).into_string(),"observed_create_ms":created,"apply_ms":now,"partial":partial}));
         if let (Some(engine), Some(created)) = (&mut self.volume, created) {
             engine.attach_observed(mint, created, now, partial);
         }
@@ -297,12 +309,7 @@ impl Pipeline {
             .unwrap_or(u64::MAX)
     }
     pub(crate) fn tick_volume(&mut self) {
-        let now = self
-            .start
-            .elapsed()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
+        let now = self.step("clock_tick", json!({})).now_ms;
         if let Some(engine) = &mut self.volume {
             let decisions = engine.advance(now).expect("monotonic receive clock");
             self.emit_volume(decisions, now);
@@ -310,12 +317,7 @@ impl Pipeline {
         }
     }
     pub(crate) fn reset_volume(&mut self) {
-        let now = self
-            .start
-            .elapsed()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
+        let now = self.step("volume_reset", json!({})).now_ms;
         if let Some(engine) = &mut self.volume {
             engine.gap(now).expect("monotonic receive clock");
         }
@@ -552,7 +554,7 @@ async fn run_inner(
         last_trade: None,
         rpc,
     };
-    pipeline.control("boot",json!({"config":config,"mode":if options.fixture.is_some(){"fixture"}else{"live"},"initial_state":"cold","decoder_schema":1}));
+    pipeline.control("boot",json!({"config":config,"mode":if options.fixture.is_some(){"fixture"}else{"live"},"initial_state":"cold","decoder_schema":1,"execution_schema":1,"volume_enabled":options.preview_volume}));
     println!(
         "{}",
         json!({"event":"collector_boot","health":format!("http://{address}/health"),"mode":if options.fixture.is_some(){"fixture"}else{"live"},"paid_requested":options.paid,"staging_delivery":options.staging_delivery,"signals_enabled":options.staging_delivery,"production_signals_enabled":false})

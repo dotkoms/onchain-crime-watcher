@@ -64,8 +64,8 @@ flags only after the matching preflight. Never run two collectors against one da
 `/ready` drives container health; Docker health failure alone does not restart the process.
 Finite process restart limits protect against a crash loop; in-process red latches stay visible
 for operator review. Use external notification monitoring for unhealthy containers as well as
-process disappearance. Docker was unavailable on the preparation machine, so image/runtime
-validation is assigned to the CI container job and remains pending until it passes.
+process disappearance. Docker was unavailable on the preparation machine. The [hosting CI run](https://github.com/dotkoms/onchain-crime-watcher/actions/runs/40322677312) passed image build, disconnected startup and offline container preflight.
+Live hosted operation remains untested.
 
 ## systemd path (future operator actions)
 

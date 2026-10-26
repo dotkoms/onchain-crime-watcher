@@ -263,3 +263,21 @@ fn offline_preflight_reports_missing_secrets_without_connecting_or_creating_stor
     assert!(output.status.success());
     assert!(!dir.path().join("data").exists());
 }
+
+#[test]
+fn analysis_replay_refuses_missing_evidence_without_using_present_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ocw"))
+        .args([
+            "--replay-analysis",
+            dir.path().join("missing.ocwcap").to_str().unwrap(),
+            "--json",
+        ])
+        .env("OCW_PUMPPORTAL_KEY", "private-test-value-do-not-log")
+        .env("OCW_DISCORD_STATUS_URL", "private-invalid-url-do-not-use")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("private-"));
+    assert!(!dir.path().join("data").exists());
+}

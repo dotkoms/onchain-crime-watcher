@@ -34,6 +34,18 @@ pub struct Health {
     pub volume_unknown: AtomicU64,
     pub volume_full: AtomicU64,
     pub volume_invalid: AtomicU64,
+    pub delivery_enabled: AtomicU64,
+    pub delivery_queued: AtomicU64,
+    pub delivery_dropped: AtomicU64,
+    pub delivery_expired: AtomicU64,
+    pub delivery_budget: AtomicU64,
+    pub delivery_duplicates: AtomicU64,
+    pub delivery_attempted: AtomicU64,
+    pub delivery_sent: AtomicU64,
+    pub delivery_unknown: AtomicU64,
+    pub delivery_rejected: AtomicU64,
+    pub delivery_limited: AtomicU64,
+    pub delivery_state: Mutex<&'static str>,
     pub feed_state: Mutex<&'static str>,
     pub capture_state: Mutex<&'static str>,
     pub paid_state: Mutex<&'static str>,
@@ -56,12 +68,16 @@ pub fn set_state(lock: &Mutex<&'static str>, s: &'static str) {
     }
 }
 impl Health {
+    pub(crate) fn feed_connected(&self) -> bool {
+        state(&self.feed_state) == "connected"
+    }
     pub fn snapshot(&self) -> Value {
-        json!({"version":env!("CARGO_PKG_VERSION"),"milestone":"M1a","signals_enabled":false,
+        json!({"version":env!("CARGO_PKG_VERSION"),"milestone":"M1b-preparation","signals_enabled":value(&self.delivery_enabled)>0,"production_signals_enabled":false,
             "feed":{"state":state(&self.feed_state),"verification":"single-source, unverified","generation":value(&self.generation),"frames":value(&self.frames),"trades":value(&self.trades),"creates":value(&self.creates),"migrations":value(&self.migrations),"duplicates":value(&self.duplicates),"unresolved":value(&self.unresolved),"decode_errors":value(&self.decode_errors),"unusable_reserves":value(&self.unusable_reserves),"last_frame_ms":value(&self.last_frame_ms)},
             "capture":{"state":state(&self.capture_state),"written_records":value(&self.capture_written),"dropped_records":value(&self.capture_dropped),"bytes":value(&self.capture_bytes),"recovered_bytes":value(&self.capture_recovered),"replay_mode":"decoder-only"},
             "paid":{"state":state(&self.paid_state),"billable_received":value(&self.billable_received),"reserved_messages":value(&self.budget_reserved),"stops":value(&self.budget_stops),"hard_provider_cap":false},
-            "volume":{"preview_enabled":value(&self.volume_enabled)>0,"active_mints":value(&self.volume_active),"evaluated_buckets":value(&self.volume_evaluated),"warmup_buckets":value(&self.volume_warmup),"fire_candidates":value(&self.volume_fire),"near_candidates":value(&self.volume_near),"unknown_mint_trades":value(&self.volume_unknown),"registry_full":value(&self.volume_full),"invalid_buckets":value(&self.volume_invalid),"delivery":"disabled"},
+            "volume":{"preview_enabled":value(&self.volume_enabled)>0,"active_mints":value(&self.volume_active),"evaluated_buckets":value(&self.volume_evaluated),"warmup_buckets":value(&self.volume_warmup),"fire_candidates":value(&self.volume_fire),"near_candidates":value(&self.volume_near),"unknown_mint_trades":value(&self.volume_unknown),"registry_full":value(&self.volume_full),"invalid_buckets":value(&self.volume_invalid),"delivery":if value(&self.delivery_enabled)>0 {"staging"}else{"disabled"}},
+            "staging_delivery":{"enabled":value(&self.delivery_enabled)>0,"state":if value(&self.delivery_enabled)==0 {"disabled"}else{state(&self.delivery_state)},"queued":value(&self.delivery_queued),"dropped":value(&self.delivery_dropped),"expired_or_generation_changed":value(&self.delivery_expired),"budget_suppressed":value(&self.delivery_budget),"duplicates":value(&self.delivery_duplicates),"attempted":value(&self.delivery_attempted),"sent":value(&self.delivery_sent),"unknown":value(&self.delivery_unknown),"rejected":value(&self.delivery_rejected),"rate_limited":value(&self.delivery_limited)},
             "outage":{"sent":value(&self.outage_sent),"unknown_or_failed":value(&self.outage_unknown)}})
     }
 }

@@ -1,6 +1,8 @@
 use crate::{
     capture::{self, Record, Tap},
     config::Config,
+    delivery,
+    discord::Pause,
     feed::{Decoder, Event},
     health::{self, Health, inc, set, set_state},
     outage,
@@ -22,6 +24,7 @@ use url::Url;
 pub struct Options {
     pub paid: bool,
     pub preview_volume: bool,
+    pub staging_delivery: bool,
     pub fixture: Option<PathBuf>,
     pub run_for: Option<Duration>,
 }
@@ -29,14 +32,17 @@ pub struct Options {
 pub(crate) struct Secrets {
     pub api_key: Option<String>,
     pub webhook: Option<String>,
+    pub staging_webhook: Option<String>,
 }
 impl std::fmt::Debug for Secrets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Secrets { api_key: [REDACTED], webhook: [REDACTED] }")
+        f.write_str(
+            "Secrets { api_key: [REDACTED], webhook: [REDACTED], staging_webhook: [REDACTED] }",
+        )
     }
 }
 impl Secrets {
-    fn from_env() -> Result<Self, String> {
+    fn from_env(staging_enabled: bool) -> Result<Self, String> {
         let api_key = std::env::var("OCW_PUMPPORTAL_KEY")
             .ok()
             .filter(|s| !s.is_empty());
@@ -52,7 +58,24 @@ impl Secrets {
         if let Some(url) = &webhook {
             outage::webhook_url(url)?;
         }
-        Ok(Self { api_key, webhook })
+        let staging_webhook = if staging_enabled {
+            Some(
+                std::env::var("OCW_DISCORD_STAGING_URL")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .ok_or("OCW_DISCORD_STAGING_URL is required for staging delivery")?,
+            )
+        } else {
+            None
+        };
+        if let Some(raw) = &staging_webhook {
+            crate::discord::webhook_url(raw)?;
+        }
+        Ok(Self {
+            api_key,
+            webhook,
+            staging_webhook,
+        })
     }
 }
 pub fn wall_ms() -> u64 {
@@ -74,6 +97,7 @@ pub(crate) struct Pipeline {
     start: Instant,
     sensitive: Option<String>,
     volume: Option<Engine>,
+    delivery: Option<delivery::Handle>,
 }
 impl Pipeline {
     fn record(&mut self, kind: &str, payload: Bytes) {
@@ -164,6 +188,9 @@ impl Pipeline {
     fn emit_volume(&mut self, decisions: Vec<Decision>, now: u64) {
         for decision in decisions {
             if let Some(preview) = decision.card(now) {
+                if let Some(sender) = &self.delivery {
+                    sender.submit(decision.clone(), self.generation);
+                }
                 let event = json!({"event":"volume_preview","source":"live_feed","decision":decision,"preview":preview,"sent":false});
                 self.control("volume_preview", event.clone());
                 println!("{event}");
@@ -204,7 +231,7 @@ pub async fn run(
     let secrets = if options.fixture.is_some() {
         Secrets::default()
     } else {
-        Secrets::from_env()?
+        Secrets::from_env(options.staging_delivery)?
     };
     let endpoint =
         Url::parse("wss://pumpportal.fun/api/data").map_err(|_| "invalid built-in endpoint")?;
@@ -219,6 +246,24 @@ async fn run_inner(
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<Value, String> {
     config.validate()?;
+    if options.staging_delivery
+        && secrets
+            .webhook
+            .as_deref()
+            .zip(secrets.staging_webhook.as_deref())
+            .is_some_and(|(status, staging)| {
+                crate::discord::webhook_url(status).ok()
+                    == crate::discord::webhook_url(staging).ok()
+            })
+    {
+        return Err("status and staging delivery require distinct webhooks".into());
+    }
+    if options.staging_delivery && config.delivery.staging_channel_id.is_none() {
+        return Err("delivery.staging_channel_id is required for staging delivery".into());
+    }
+    if options.staging_delivery && (!options.preview_volume || options.fixture.is_some()) {
+        return Err("staging delivery requires real live volume processing".into());
+    }
     if options.preview_volume && options.fixture.is_some() {
         return Err("volume previews require live mode or recorded capture replay".into());
     }
@@ -227,8 +272,10 @@ async fn run_inner(
     {
         return Err("paid mode requires feed.mint, OCW_PUMPPORTAL_KEY, and live mode".into());
     }
-    let _lock = ProcessLock::acquire(&config.data_dir)
-        .map_err(|_| "cannot acquire private data directory/collector lock")?;
+    let lock = Arc::new(
+        ProcessLock::acquire(&config.data_dir)
+            .map_err(|_| "cannot acquire private data directory/collector lock")?,
+    );
     let listener = tokio::net::TcpListener::bind(config.health_bind)
         .await
         .map_err(|_| "cannot bind loopback health endpoint")?;
@@ -239,6 +286,34 @@ async fn run_inner(
     set_state(&health.paid_state, "off");
     set_state(&health.feed_state, "starting");
     set(&health.volume_enabled, u64::from(options.preview_volume));
+    let global_pause = Arc::new(Pause::default());
+    let boot = format!("{:x}{:x}", wall_ms(), std::process::id());
+    let origin = Instant::now();
+    let delivery_runtime = if options.staging_delivery {
+        Some(
+            delivery::Runtime::start(
+                config.delivery.clone(),
+                secrets
+                    .staging_webhook
+                    .as_deref()
+                    .ok_or("OCW_DISCORD_STAGING_URL is required")?,
+                delivery::Context {
+                    data_dir: config.data_dir.clone(),
+                    health: health.clone(),
+                    global: global_pause.clone(),
+                    guard: lock.clone(),
+                    boot: boot.clone(),
+                    origin,
+                },
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let delivery = delivery_runtime
+        .as_ref()
+        .map(|runtime| runtime.handle.clone());
     let (stop_server, mut stop_rx) = tokio::sync::watch::channel(false);
     let mut server = tokio::spawn(health::serve(listener, health.clone(), async move {
         while !*stop_rx.borrow() {
@@ -252,7 +327,6 @@ async fn run_inner(
         config.capture.clone(),
         health.clone(),
     );
-    let boot = format!("{:x}{:x}", wall_ms(), std::process::id());
     let mut pipeline = Pipeline {
         decoder: Decoder::new(config.feed.dedup_capacity, config.feed.dedup_window_ms),
         health: health.clone(),
@@ -260,14 +334,15 @@ async fn run_inner(
         tap,
         seq: 0,
         boot,
-        start: Instant::now(),
+        start: origin,
         sensitive: secrets.api_key.clone(),
         volume: options.preview_volume.then(|| Engine::new(256)),
+        delivery,
     };
     pipeline.control("boot",json!({"config":config,"mode":if options.fixture.is_some(){"fixture"}else{"live"},"initial_state":"cold","decoder_schema":1}));
     println!(
         "{}",
-        json!({"event":"collector_boot","health":format!("http://{address}/health"),"mode":if options.fixture.is_some(){"fixture"}else{"live"},"paid_requested":options.paid,"signals_enabled":false})
+        json!({"event":"collector_boot","health":format!("http://{address}/health"),"mode":if options.fixture.is_some(){"fixture"}else{"live"},"paid_requested":options.paid,"staging_delivery":options.staging_delivery,"signals_enabled":options.staging_delivery,"production_signals_enabled":false})
     );
     let timer = async {
         if let Some(duration) = options.run_for {
@@ -289,11 +364,22 @@ async fn run_inner(
         _=timer=>(Ok(()),false),
         _=&mut server=>(Err("health server stopped unexpectedly".into()),true),
     };
+    set_state(
+        &health.feed_state,
+        if result.is_err() {
+            "failed"
+        } else {
+            "stopping"
+        },
+    );
+    if let Some(sender) = delivery_runtime {
+        sender.shutdown().await;
+    }
     if result.is_err() {
         set_state(&health.feed_state, "failed");
         pipeline.control("outage", json!({"class":"collector_failure"}));
         if options.fixture.is_none() {
-            outage::notify(secrets.webhook.as_deref(), &health).await;
+            outage::notify(secrets.webhook.as_deref(), &health, &global_pause).await;
         }
     } else {
         set_state(
@@ -347,138 +433,4 @@ async fn fixture(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use futures_util::{SinkExt, StreamExt};
-    use tokio::net::TcpListener;
-    use tokio_tungstenite::{accept_async, tungstenite::Message};
-
-    #[tokio::test]
-    async fn paid_stop_closes_first_socket_before_free_only_replacement() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = crate::config::Config {
-            data_dir: dir.path().join("data"),
-            ..crate::config::Config::default()
-        };
-        crate::storage::private_dir(&config.data_dir).unwrap();
-        config.health_bind = "127.0.0.1:0".parse().unwrap();
-        config.capture.min_free_bytes = 0;
-        config.feed.mint = Some(bs58::encode([1u8; 32]).into_string());
-        config.gate = crate::config::GateConfig {
-            daily_messages: 8,
-            stop_margin_messages: 2,
-            reservation_messages: 2,
-        };
-        crate::spend::Ledger::initialize(
-            &config.data_dir.join("feed-spend.json"),
-            wall_ms() / 86_400_000,
-        )
-        .unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint =
-            url::Url::parse(&format!("ws://{}", listener.local_addr().unwrap())).unwrap();
-        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-        let provider = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = accept_async(stream).await.unwrap();
-            let mut methods = Vec::new();
-            for _ in 0..3 {
-                let raw = socket.next().await.unwrap().unwrap().into_data();
-                methods.push(
-                    serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["method"]
-                        .as_str()
-                        .unwrap()
-                        .to_string(),
-                );
-            }
-            assert_eq!(
-                methods,
-                vec![
-                    "subscribeNewToken",
-                    "subscribeMigration",
-                    "subscribeTokenTrade"
-                ]
-            );
-            socket.send(Message::Text(serde_json::json!({"txType":"create","mint":bs58::encode([1u8;32]).into_string()}).to_string().into())).await.unwrap();
-            for n in 1..=6 {
-                let trade = serde_json::json!({"txType":"buy","mint":bs58::encode([1u8;32]).into_string(),"traderPublicKey":bs58::encode([2u8;32]).into_string(),"signature":bs58::encode([n;64]).into_string(),"tokenAmount":1,"solAmount":1});
-                socket
-                    .send(Message::Text(trade.to_string().into()))
-                    .await
-                    .unwrap();
-            }
-            assert!(matches!(socket.next().await, Some(Ok(Message::Close(_)))));
-            drop(socket);
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = accept_async(stream).await.unwrap();
-            for expected in ["subscribeNewToken", "subscribeMigration"] {
-                let raw = socket.next().await.unwrap().unwrap().into_data();
-                assert_eq!(
-                    serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["method"],
-                    expected
-                );
-            }
-            assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(100), socket.next())
-                    .await
-                    .is_err()
-            );
-            stop_tx.send(()).unwrap();
-            // Keep the replacement transport alive until the collector handles shutdown.
-            // Dropping it here races the shutdown signal against a transport failure.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next()).await;
-        });
-        let secrets = Secrets {
-            api_key: Some("unit-test-key-do-not-log".into()),
-            webhook: None,
-        };
-        let options = Options {
-            paid: true,
-            preview_volume: true,
-            ..Options::default()
-        };
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            run_inner(config, options, secrets, endpoint, async {
-                let _ = stop_rx.await;
-            }),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        provider.await.unwrap();
-        assert_eq!(result["paid"]["reserved_messages"], 6);
-        assert_eq!(result["paid"]["billable_received"], 6);
-        assert_eq!(result["paid"]["stops"], 1);
-        assert_eq!(result["feed"]["trades"], 6);
-        assert_eq!(result["feed"]["generation"], 2);
-        assert_eq!(result["volume"]["preview_enabled"], true);
-        assert_eq!(result["volume"]["active_mints"], 1);
-        assert_eq!(result["volume"]["unknown_mint_trades"], 0);
-        assert_eq!(result["volume"]["fire_candidates"], 0);
-        assert!(!result.to_string().contains("unit-test-key"));
-    }
-
-    #[tokio::test]
-    async fn health_endpoint_reports_counts_without_credentials() {
-        let health = std::sync::Arc::new(crate::health::Health::default());
-        crate::health::inc(&health.frames);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (stop, rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(crate::health::serve(listener, health, async {
-            let _ = rx.await;
-        }));
-        let body: serde_json::Value = reqwest::get(format!("http://{addr}/health"))
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(body["feed"]["frames"], 1);
-        assert_eq!(body["signals_enabled"], false);
-        assert!(body.get("api_key").is_none());
-        stop.send(()).unwrap();
-        task.await.unwrap().unwrap();
-    }
-}
+mod tests;

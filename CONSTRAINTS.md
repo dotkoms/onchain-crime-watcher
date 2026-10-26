@@ -22,3 +22,9 @@ provider coverage or billing correctness.
 Coverage and performance numbers remain measured targets until M1c; no coverage percentage has
 been invented for this first increment. Provider completeness, bill reconciliation and staging
 Discord acceptance require external credentials and are reported separately from local tests.
+
+Real-data-only preparation adds these constraints: default startup is disconnected and shows no
+sample events/signals; networking requires explicit `--live`; recorded replay is read-only and
+does not invent launch history or complete a partial bucket. Unit tests may construct artificial
+edge cases in isolation, but the application must not embed or run demo data. Signal candidates
+remain previews with delivery disabled. Existing build, spending and capture limits still apply.

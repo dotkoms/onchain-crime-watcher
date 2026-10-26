@@ -13,3 +13,13 @@ External acceptance (not replaced by fixtures):
 - [ ] Paid trade fixture and payload/ATA comparisons with provider key.
 - [ ] One-hour reference-count and billing/teardown reconciliation.
 - [ ] Staging Discord webhook acceptance.
+
+## Real-data-only volume preparation
+
+- [x] Bounded volume engine, scope priors, gap/migration reset and expiry contract tests.
+- [x] Recorded-capture replay with real receive timing and no generated data.
+- [x] Disconnected default and opt-in live volume previews, with mode conflict tests.
+- [x] Runbook and complete local checks.
+- [ ] Push review branch.
+
+Live acceptance above is deliberately deferred at the user's request, not marked passed.

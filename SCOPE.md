@@ -5,8 +5,10 @@ Built from scratch; `~/Projects/volume-scanner` is a reference for observed payl
 hard-won lessons only — no code is carried over.
 
 Status: revision 6, 2026-10-25, planning corrections after review of revision 5: capture and replay
-backtesting, hot failover between feeds, and exit alerts for watched wallets, all in v1. M1a implementation has started; local verification and remaining empirical
-acceptance are recorded in `docs/m1a.md` and `tasks/todo.md`. M1b/M1c remain pending.
+backtesting, hot failover between feeds, and exit alerts for watched wallets, all in v1. M1a is
+implemented; verification and remaining empirical acceptance are recorded in `docs/m1a.md` and
+`tasks/todo.md`. At the user's request, default startup is disconnected and real-data-only volume
+preparation proceeds without demos (`docs/real-data.md`). Live M1b acceptance and M1c remain pending.
 
 ## 0. Revision log
 

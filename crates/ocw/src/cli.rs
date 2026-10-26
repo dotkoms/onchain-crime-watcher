@@ -11,7 +11,12 @@ use std::{io::Read, path::PathBuf, time::Duration};
 struct Cli {
     config: Option<PathBuf>,
     fixture: Option<PathBuf>,
+    replay: Option<PathBuf>,
     inspect: Option<PathBuf>,
+    live: bool,
+    status: bool,
+    json: bool,
+    preview_volume: bool,
     paid: bool,
     dry: bool,
     check: bool,
@@ -25,7 +30,7 @@ fn parse() -> Result<Option<Cli>, String> {
         match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "ocw --config <file> [--run-for-secs N] [--enable-paid]\nocw --config <file> --fixture <JSONL>\nocw --config <file> --dry | --check-config | --init-spend-ledger\nocw --inspect-capture <segment.ocwcap>\nPaid mode requires one feed.mint, OCW_PUMPPORTAL_KEY and an explicitly initialized ledger.\nM1a has no signal alerts. Health binds only to localhost."
+                    "ocw [--status]                               Waiting-for-data status (default)\nocw --replay-capture <segment.ocwcap> [--json] Recorded real frames and volume previews\nocw --config <file> --fixture <raw-JSONL>     Recorded frame inspection\nocw --live --config <file> [--run-for-secs N] [--enable-paid] [--preview-volume]\nocw --config <file> --dry | --check-config | --init-spend-ledger\nocw --inspect-capture <segment.ocwcap>\nNetworking requires --live. No sample data or generated signals are supplied.\nPaid mode requires one feed.mint, OCW_PUMPPORTAL_KEY and an explicitly initialized ledger.\nVolume cards are previews only; Discord signal delivery is not enabled."
                 );
                 return Ok(None);
             }
@@ -33,6 +38,17 @@ fn parse() -> Result<Option<Cli>, String> {
             "--fixture" => {
                 cli.fixture = Some(args.next().ok_or("--fixture requires a path")?.into())
             }
+            "--replay-capture" => {
+                cli.replay = Some(
+                    args.next()
+                        .ok_or("--replay-capture requires a path")?
+                        .into(),
+                )
+            }
+            "--live" => cli.live = true,
+            "--status" => cli.status = true,
+            "--preview-volume" => cli.preview_volume = true,
+            "--json" => cli.json = true,
             "--inspect-capture" => {
                 cli.inspect = Some(
                     args.next()
@@ -58,12 +74,47 @@ fn parse() -> Result<Option<Cli>, String> {
             _ => return Err("unknown argument; use --help (argument values redacted)".into()),
         }
     }
-    let modes = [cli.dry, cli.check, cli.init, cli.inspect.is_some()]
-        .into_iter()
-        .filter(|b| *b)
-        .count();
-    if modes > 1 || (modes > 0 && cli.fixture.is_some()) {
+    let modes = [
+        cli.dry,
+        cli.check,
+        cli.init,
+        cli.inspect.is_some(),
+        cli.live,
+        cli.status,
+        cli.fixture.is_some(),
+        cli.replay.is_some(),
+    ]
+    .into_iter()
+    .filter(|b| *b)
+    .count();
+    if modes > 1 {
         return Err("choose one collector/inspection mode".into());
+    }
+    if cli.paid && !cli.live && !cli.dry {
+        return Err(
+            "--enable-paid requires explicit --live (or --dry for a subscription preview)".into(),
+        );
+    }
+    if cli.seconds.is_some() && !cli.live {
+        return Err(
+            "--run-for-secs requires --live; recorded captures use their recorded receive times"
+                .into(),
+        );
+    }
+    if cli.paid && (cli.check || cli.init || cli.inspect.is_some()) {
+        return Err("--enable-paid is only valid with --live or --dry".into());
+    }
+    if modes == 0 {
+        cli.status = true;
+    }
+    if cli.json && cli.replay.is_none() {
+        return Err("--json is only valid for capture replay".into());
+    }
+    if cli.preview_volume && !cli.live {
+        return Err(
+            "--preview-volume requires --live; capture replay evaluates volume automatically"
+                .into(),
+        );
     }
     Ok(Some(cli))
 }
@@ -80,6 +131,46 @@ fn read_config(path: PathBuf) -> Result<Config, String> {
     Config::parse(&text)
 }
 async fn execute(cli: Cli) -> Result<(), String> {
+    if cli.status || cli.replay.is_some() {
+        let config = match cli.config {
+            Some(path) => read_config(path)?,
+            None => Config::default(),
+        };
+        let Some(path) = cli.replay else {
+            println!(
+                "{}",
+                json!({"state":"waiting_for_data","provider_connected":false,
+                "trades":0,"last_trade_ms":null,"alerts_sent":0,"signals_enabled":false,
+                "network":"disabled; requires explicit --live","data":"none; no sample data"})
+            );
+            return Ok(());
+        };
+        use std::io::Write;
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        let result = ocw_core::replay::run(&path, &config.feed, |decision, now| {
+            let preview = decision.card(now);
+            if cli.json {
+                writeln!(
+                    out,
+                    "{}",
+                    json!({"event":"volume_decision","source":"recorded_capture",
+                    "decision":decision,"preview":preview})
+                )
+                .map_err(|_| "cannot write preview")?;
+            } else if let Some(card) = preview {
+                writeln!(
+                    out,
+                    "Recorded capture (historical, not live):\n{}",
+                    card["content"].as_str().unwrap_or_default()
+                )
+                .map_err(|_| "cannot write preview")?;
+            }
+            Ok(())
+        })?;
+        writeln!(out, "{result}").map_err(|_| "cannot write summary")?;
+        out.flush().map_err(|_| "cannot flush preview")?;
+        return Ok(());
+    }
     if let Some(path) = cli.inspect {
         let mut frames = 0u64;
         let mut records = 0u64;
@@ -137,6 +228,7 @@ async fn execute(cli: Cli) -> Result<(), String> {
     }
     let options = Options {
         paid: cli.paid,
+        preview_volume: cli.preview_volume,
         fixture: cli.fixture,
         run_for: cli.seconds.map(Duration::from_secs),
     };

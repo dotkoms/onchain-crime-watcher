@@ -1,8 +1,7 @@
 # Fixture provenance
 
-`synthetic.jsonl` is fabricated test input, not a provider capture or on-chain transaction.
-It exercises create, trade and duplicate handling with valid-shaped base58 values.
-Real provider fixture evidence is recorded separately; no synthetic fixture pins a live schema.
+This directory contains observed provider payloads. Artificial edge cases are constructed only
+inside automated tests and are never embedded or run as application demo data.
 
 `pumpportal-create-observed.jsonl` contains four text frames captured from the free
 PumpPortal create/migration subscriptions during a 20-second probe on 2026-10-26 UTC

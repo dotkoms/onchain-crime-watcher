@@ -5,6 +5,7 @@ use crate::{
     health::{self, Health, inc, set, set_state},
     outage,
     storage::ProcessLock,
+    volume::{Decision, Engine},
 };
 use bytes::Bytes;
 use serde_json::{Value, json};
@@ -20,6 +21,7 @@ use url::Url;
 #[derive(Default)]
 pub struct Options {
     pub paid: bool,
+    pub preview_volume: bool,
     pub fixture: Option<PathBuf>,
     pub run_for: Option<Duration>,
 }
@@ -71,6 +73,7 @@ pub(crate) struct Pipeline {
     boot: String,
     start: Instant,
     sensitive: Option<String>,
+    volume: Option<Engine>,
 }
 impl Pipeline {
     fn record(&mut self, kind: &str, payload: Bytes) {
@@ -102,30 +105,94 @@ impl Pipeline {
         {
             inc(&self.health.capture_dropped);
             inc(&self.health.decode_errors);
+            if let Some(engine) = &mut self.volume {
+                engine.invalidate();
+            }
             self.control("redacted_frame", json!({"reason":"credential_echo"}));
             return;
         }
         self.record("frame", bytes.clone());
-        match self.decoder.decode(
-            &bytes,
-            self.start
-                .elapsed()
-                .as_millis()
-                .try_into()
-                .unwrap_or(u64::MAX),
-        ) {
-            Ok(Event::Trade(_)) => inc(&self.health.trades),
-            Ok(Event::Create(_)) => inc(&self.health.creates),
-            Ok(Event::Migration(_)) => inc(&self.health.migrations),
-            Ok(Event::Duplicate) => inc(&self.health.duplicates),
-            Ok(Event::Unresolved) => inc(&self.health.unresolved),
-            Ok(Event::Other) => {}
-            Err(_) => inc(&self.health.decode_errors),
+        let now = self
+            .start
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        match self.decoder.decode(&bytes, now) {
+            Ok(event) => {
+                match &event {
+                    Event::Trade(_) => inc(&self.health.trades),
+                    Event::Create(_) => inc(&self.health.creates),
+                    Event::Migration(_) => inc(&self.health.migrations),
+                    Event::Duplicate => inc(&self.health.duplicates),
+                    Event::Unresolved => inc(&self.health.unresolved),
+                    Event::Other => {}
+                }
+                if let Some(engine) = &mut self.volume {
+                    let decisions = engine
+                        .on_event(event, now)
+                        .expect("monotonic receive clock");
+                    self.emit_volume(decisions, now);
+                }
+            }
+            Err(_) => {
+                inc(&self.health.decode_errors);
+                if let Some(engine) = &mut self.volume {
+                    engine.invalidate();
+                }
+            }
         }
+        self.volume_health();
         set(
             &self.health.unusable_reserves,
             self.decoder.unusable_reserves(),
         );
+    }
+    fn volume_health(&self) {
+        if let Some(engine) = &self.volume {
+            let stats = engine.stats();
+            set(&self.health.volume_active, engine.active_mints() as u64);
+            set(&self.health.volume_evaluated, stats.evaluated);
+            set(&self.health.volume_warmup, stats.warmup);
+            set(&self.health.volume_fire, stats.fire);
+            set(&self.health.volume_near, stats.near);
+            set(&self.health.volume_unknown, stats.unknown_trades);
+            set(&self.health.volume_full, stats.registry_full);
+            set(&self.health.volume_invalid, stats.invalidated_buckets);
+        }
+    }
+    fn emit_volume(&mut self, decisions: Vec<Decision>, now: u64) {
+        for decision in decisions {
+            if let Some(preview) = decision.card(now) {
+                let event = json!({"event":"volume_preview","source":"live_feed","decision":decision,"preview":preview,"sent":false});
+                self.control("volume_preview", event.clone());
+                println!("{event}");
+            }
+        }
+    }
+    pub(crate) fn tick_volume(&mut self) {
+        let now = self
+            .start
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        if let Some(engine) = &mut self.volume {
+            let decisions = engine.advance(now).expect("monotonic receive clock");
+            self.emit_volume(decisions, now);
+            self.volume_health();
+        }
+    }
+    pub(crate) fn reset_volume(&mut self) {
+        let now = self
+            .start
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        if let Some(engine) = &mut self.volume {
+            engine.gap(now).expect("monotonic receive clock");
+        }
     }
 }
 
@@ -152,6 +219,9 @@ async fn run_inner(
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<Value, String> {
     config.validate()?;
+    if options.preview_volume && options.fixture.is_some() {
+        return Err("volume previews require live mode or recorded capture replay".into());
+    }
     if options.paid
         && (options.fixture.is_some() || config.feed.mint.is_none() || secrets.api_key.is_none())
     {
@@ -168,6 +238,7 @@ async fn run_inner(
     let health = Arc::new(Health::default());
     set_state(&health.paid_state, "off");
     set_state(&health.feed_state, "starting");
+    set(&health.volume_enabled, u64::from(options.preview_volume));
     let (stop_server, mut stop_rx) = tokio::sync::watch::channel(false);
     let mut server = tokio::spawn(health::serve(listener, health.clone(), async move {
         while !*stop_rx.borrow() {
@@ -191,6 +262,7 @@ async fn run_inner(
         boot,
         start: Instant::now(),
         sensitive: secrets.api_key.clone(),
+        volume: options.preview_volume.then(|| Engine::new(256)),
     };
     pipeline.control("boot",json!({"config":config,"mode":if options.fixture.is_some(){"fixture"}else{"live"},"initial_state":"cold","decoder_schema":1}));
     println!(
@@ -327,6 +399,7 @@ mod tests {
                     "subscribeTokenTrade"
                 ]
             );
+            socket.send(Message::Text(serde_json::json!({"txType":"create","mint":bs58::encode([1u8;32]).into_string()}).to_string().into())).await.unwrap();
             for n in 1..=6 {
                 let trade = serde_json::json!({"txType":"buy","mint":bs58::encode([1u8;32]).into_string(),"traderPublicKey":bs58::encode([2u8;32]).into_string(),"signature":bs58::encode([n;64]).into_string(),"tokenAmount":1,"solAmount":1});
                 socket
@@ -361,6 +434,7 @@ mod tests {
         };
         let options = Options {
             paid: true,
+            preview_volume: true,
             ..Options::default()
         };
         let result = tokio::time::timeout(
@@ -378,6 +452,10 @@ mod tests {
         assert_eq!(result["paid"]["stops"], 1);
         assert_eq!(result["feed"]["trades"], 6);
         assert_eq!(result["feed"]["generation"], 2);
+        assert_eq!(result["volume"]["preview_enabled"], true);
+        assert_eq!(result["volume"]["active_mints"], 1);
+        assert_eq!(result["volume"]["unknown_mint_trades"], 0);
+        assert_eq!(result["volume"]["fire_candidates"], 0);
         assert!(!result.to_string().contains("unit-test-key"));
     }
 

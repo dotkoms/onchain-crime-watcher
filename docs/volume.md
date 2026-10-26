@@ -249,7 +249,7 @@ The reject moved 2.6× the median bucket and still failed: the floored baseline 
 
 ## 9. Config
 
-All keys are `volume.`-prefixed (`volume.bucket.secs`, `volume.fire.ratio`, …); unknown keys fail boot (`config/`). Boot also rejects `card.max.age.secs × 1000 ≠ deliver.budget_wait_max_ms`, as it does the bundle window check. PRIOR rows move one at a time, with the expected counter movement stated first.
+All keys are `volume.`-prefixed (`volume.bucket.secs`, `volume.fire.ratio`, …); unknown keys fail boot (`config/`). Delivery owns per-kind expiry; there is no detector-side max-age alias. Boot rejects unknown legacy `deliver.budget_wait_max_ms` and `volume.card.max.age.secs` keys with the replacement field names. PRIOR rows move one at a time, with the expected counter movement stated first.
 
 Suppression hierarchy: trade dedup (`feed.md`) → alert dedup (`delivery.md`) → cooldown (`delivery.md`). `play_hold_secs` is pre-queue suppression only and never paces delivery.
 
@@ -282,7 +282,7 @@ Suppression hierarchy: trade dedup (`feed.md`) → alert dedup (`delivery.md`) �
 | `cold.cooldown.secs` | s | 900 | PRIOR | Cold absolute spikes are rare and repeatable. |
 | `ticker.ms` | ms | 100 | PRIOR | Close granularity, 150× under Δ. |
 | `close.batch` | count/tick | 64 | PRIOR | Caps close work so a burst cannot stall decode. |
-| `card.max.age.secs` | s | 600 | PRIOR | Budget-wait bound for fire candidates; must equal `deliver.budget_wait_max_ms`. Older than 10 min is context, not an alert. |
+| `deliver.max_age.volume_fire_ms` / `deliver.max_age.volume_near_ms` | ms | 30000 / 15000 | PRIOR, delivery-owned | Detector passes original detection time; no duplicate volume age setting |
 
 ## 10. Counters and health
 
@@ -313,4 +313,5 @@ Process counters on `/health` and the heartbeat (`operations.md`).
 4. **Cohort window.** 30–60 min may still blend a launch spike with a dead afternoon. Recommendation: keep 1800 s; read `volume_band_p90` against the card's own ratio before changing it.
 5. **MAD = 0.** The dispersion requirement then collapses to `0.5 × median`; vector 2 is that case. Recommendation: keep 0.5 unless steady tokens never fire at plausible multiples.
 6. **Late and healed trades.** SCOPE §6.3 excludes healed volume from baselines until the shadow agrees. Recommendation: keep it, count it, never blend silently.
-7. **Card age.** Budget admission can take 6 min. Recommendation: drop candidates older than 600 s, the same value as `deliver.budget_wait_max_ms`, and count the expiry rather than posting a stale bucket as live.
+7. **Card age.** Fire expires at 30 s and near at 15 s from detection, checked by delivery before every attempt. Measure age and survival by class before enabling production; change priors only with recorded evidence.
+

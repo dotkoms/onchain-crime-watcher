@@ -1,6 +1,6 @@
 # Bundle status and CTO subsystem
 
-Status: design spec, 2026-10-25. Implements `SCOPE.md` revision 5 §2B, §7, Q3–Q5, R3–R5, R8 and
+Status: design spec, 2026-10-25. Implements `SCOPE.md` revision 6 §2B, §7, Q3–Q5, R3–R5, R8 and
 milestones M3/M4 of §9. The contract is [../SCOPE.md](../SCOPE.md); this file must not contradict
 it. Every number marked **PRIOR** is invented and carries its rationale.
 
@@ -12,6 +12,10 @@ This subsystem owns launch-window capture, the launch record, the funding stage,
 tier state machine, the CTO poll and the card content. It does not own trade subscription policy
 (`feed.md`), webhook budget and edit transport (`delivery.md`), store implementation
 (`ranking.md`), provider endpoints (`sources.md`) or config plumbing (`operations.md`).
+
+Buyer/funding fields below are logical record fields; revision 6 adds ordered window events.
+The historical byte counts describe the buyer-only representation and must be remeasured with
+versioned encoding and a bounded event count in M1c/M4. Overflow makes the history partial.
 
 The launch record shares the bounded side store with rank aggregates: off the hot path, prunable,
 allowed to lag, allowed to be partial. It is **never read on the volume alert path**; the CTO path
@@ -29,8 +33,9 @@ the buy happened; clustering runs later, asynchronously, possibly weeks later (�
 ### 1.2 At window close
 Per distinct buyer, in first-buy order: `wallet`, `first_buy_off_ms` (from t0), `first_buy_wall_ms`,
 `buy_sol_lamports`, `buy_tokens_raw` from its **first** buy, `bag_tokens_raw` from
-`newTokenBalance` after that buy (exact, R4), `bag_source`, `sol_source`. Sells inside the window
-are not stored. A capped, dropped or gapped subscription still writes a record, with
+`newTokenBalance` after that buy (exact, R4), `bag_source`, `sol_source`. Ordered buys and sells inside the window are retained with the record so later funding
+classification can reconstruct the opening inventory. A missing trade interval makes sold share
+partial; a launch buyer list alone is not a sales history. A capped, dropped or gapped subscription still writes a record, with
 `window_truncated` set.
 ### 1.3 Records (integers LE, no strings, mint is `[u8;32]`)
 **LaunchRecord** (once, ≤ 1 s after window close) — header **142 B**: `mint`32, `schema`u8 1,
@@ -121,38 +126,47 @@ TTL 900 s; cap 10,000 wallets; LRU. ~500 B/entry → **~5 MB**. The key is the w
 `(wallet, buy_time)`: the raw signature window is re-filtered per lookup, and
 `(wallet, reference_time)` is memoised within a run so a shared funder costs one fetch.
 ## 3. Bundle math
-`B` = members after exclusion and fan-out.
+
+`B` = members after exclusion and fan-out. Revision 6 replaces sale-proceeds / purchase-spend:
+price appreciation cannot turn a small sale into a fully sold bag.
 
 | Quantity | Formula | Note |
 |---|---|---|
-| Opening bag | `bag_w = newTokenBalance` after `w`'s first window buy | raw units; fallback `tokenAmount` |
-| Bought | `B_sol = Σ_{B} buy_sol_lamports / 1e9` | first buy only (§11) |
-| Sold | `S_sol = Σ_{B} Σ_{sells} sol_lamports / 1e9`, first observation → now | SOL-weighted |
-| Percent sold | `pct_raw = 100·S_sol/B_sol`; display `floor(clamp(pct_raw, 0, 100))` | tier uses `pct_raw` |
-| Wallet share | `fully_out / |B|`, fully out = bag remainder ≤ 1% of `bag_w` | matches the delivery card (`11/14 fully out`) |
-| Supply share | `100 · Σ bag_w / total_supply_raw` | raw/raw, decimals cancel |
-| Gate | `|B| ≥ 5 ∧ B_sol ≥ 10 ∧ supply_share ≥ 2` | all three, before any tier word |
+| Opening bag | `q0_w = newTokenBalance` after first window buy | Require known opening inventory; unknown prior holdings make the basis partial |
+| Weight | `c0_w = first_buy_sol_lamports` | Fixed original SOL weight, never revalued at sale price |
+| Sold fraction | `f_w = allocated_original_tokens_sold / q0_w` | Raw token units, in [0,1] |
+| Percent sold | `100 × Σ(c0_w × f_w) / Σ(c0_w)` | SOL-weighted token fractions; use exact integer/rational comparisons before display rounding |
+| Sale proceeds | `Σ observed sell SOL` | Separate informational field, never the tier denominator |
+| Wallet share | fully out / member count | Current balance ≤1% of opening bag, with complete inventory observation |
+| Supply share | `100 × Σ q0_w / total_supply_raw` | Raw/raw |
+| Gate | ≥5 members, ≥10 SOL original cost, ≥2% supply | All before a tier word |
 
-`sol_lamports` is the normalized field, with `sol_source` = `Payload` | `ReserveDelta`. The adapter
-uses `solAmount` when present — observed but optional, not guaranteed — else derives the signed
-`vSol` delta (`v_sol_after − v_sol_before`, sign-checked against `txType`). The first trade on a
-mint takes "before" from the create reserves (§11). Sums in `u128`, one `f64` division. Flooring means 79.6% never prints as 80%. Over 100% is
-possible and is clamped for display and tier, counted `clamp_hits`.
-### 3.1 Worked example, 6 wallets, supply 1,000,000,000
-| w | bought SOL | price SOL/token | bag tokens | sold SOL |
-|---|---|---|---|---|
-| w1 | 4.00 | 3.2e-7 | 12,500,000 | 2.50 |
-| w2 | 3.00 | 3.4e-7 | 8,823,529 | 3.90 |
-| w3 | 2.00 | 3.6e-7 | 5,555,556 | 2.50 |
-| w4 | 1.50 | 3.8e-7 | 3,947,368 | 0 |
-| w5 | 1.00 | 3.9e-7 | 2,564,103 | 1.00 |
-| w6 | 0.50 | 4.0e-7 | 1,250,000 | 0 |
-| Σ | **12.00** | | **34,640,556** | **9.90** |
+Track current inventory and remaining original-bag units per member. Later buys add inventory
+without increasing the original bag or its weight. A sale allocates to original-bag units in
+proportion to their share of pre-sale inventory, with the same integer rounding and final-sale
+dust removal as `ranking.md` §2. This is an explicit fungible-inventory accounting convention,
+not an assertion about which physical token was sold. Never count the same original units twice.
 
-Gate: 6 ≥ 5; 12.00 ≥ 10; 34,640,556/1e9 = **3.46%** ≥ 2%. `pct_raw = 82.5` → **FIRE**, card
-`FIRE 82% sold · 3 of 6 wallets fully out`. Later w1 sells the rest for 2.90 → `S = 12.80`,
-`pct_raw = 106.7`, display 100 → **CLEARED**, one edit, `clamp_hits = 1`. Contrast: 4 wallets /
-9.40 SOL / 1.80% → `below minimums (4 wallets · 9.40 SOL · 1.8% supply)`, no tier, no edits opened.
+A transfer mismatch or missing sales interval marks the fraction partial. Only the fraction
+supported by observed sales may be shown as a lower bound; do not infer a sale from a balance
+fall or print CLEARED on incomplete history. Late CTO funding classification needs the ordered
+history from opening to observation; if it was not retained, the card says
+`sold share unavailable — history incomplete`. The launch record alone cannot recover it.
+CLEARED also requires current holdings ≤5% of the original bags; later accumulation is shown and
+can withhold the word even when most original-bag units were disposed of.
+
+### 3.1 Worked examples
+
+Six members each buy an opening bag for 2 SOL, together ≥2% of supply. Original cost is 12 SOL.
+If each sells 20% of its tokens at 5× its entry price, proceeds total 12 SOL but the sold share is
+**20%**, with no tier. If each sells 80%, the share is **80%**, FIRE, regardless of sale price.
+At 95%, with ≤5% remaining, complete history and the price context in §5, the state is CLEARED.
+
+A wallet buying 100 tokens for 10 SOL, selling 50, adding 50 and selling 90 has 5 original-bag
+units remaining under the proportional convention (95% disposed) but 10 current tokens held.
+The current-holdings guard withholds CLEARED; the remaining and newly accumulated inventory are
+shown. Transferring 60 and selling 30 never becomes 90% sold.
+
 ## 4. Tier state machine
 States `NONE`, `NEAR` (≥ 60), `FIRE` (≥ 80), `CLEARED` (≥ 95), plus flags `STALE`, `PARTIAL`,
 `NO_TARGET`.
@@ -206,8 +220,7 @@ hour → `1h peak unavailable (no series)`; missing pair → `price: pool price 
 USD, keep SOL.
 
 **Reconciliation (balances only).** First bundle read and every `reconcile_interval_s` (PRIOR 900)
-while tracked: batched `getMultipleAccounts` over member token accounts, compare `expected = bag_w
-− sold_tokens_w` with the balance. `actual ≥ expected` → no gap (later buys explain a surplus).
+while tracked: batched `getMultipleAccounts` over member token accounts, compare `expected = buys_raw − sells_raw` with the balance. `actual ≥ expected` → no gap (later buys explain a surplus).
 `actual < expected` → unobserved sells **or** transfers out; indistinguishable from one read. If
 the gap exceeds 5% of `Σ bag_w` (PRIOR) the bundle is `partial` and prints `holdings below observed
 sales — sells or transfers outside observation`, plus `transfers out uncounted`. Balances never
@@ -330,8 +343,8 @@ Units sit in the key or the comment; `delivery.md` owns `deliver.cto.hourly_cap`
 | M4.5 | `G → F → w`, each leg within 60 s | one-hop member, card ends `one-hop only` |
 | M4.6 | `G → X → Y → w` | not a member, no recursion, note unchanged |
 | M4.7 | Funder in `exclusions.toml` | not clustered, counted, not `partial` for that alone |
-| M4.8 | Worked example §3.1 | `pct = 82.5`, `FIRE 82% sold`, `3 of 6 wallets` |
-| M4.9 | Second sale in the example | `pct_raw = 106.7`, display 100, CLEARED, one edit, `clamp_hits = 1` |
+| M4.8 | Six equal-cost buyers each sell 20% at 5× price | Proceeds equal original spend; sold share 20%, no FIRE/CLEARED |
+| M4.9 | Same members sell 80%, then 95% with complete history and ≤5% holdings | FIRE then CLEARED, independent of exit price; no fraction over 100% |
 | M4.10 | 3 tier jumps inside 20 s | 1 PATCH, `edits_coalesced = 2` |
 | M4.11 | Percent falls after FIRE; stale read | no edit, tier held, `stale_reads ≥ 1` |
 | M4.12 | Restart at FIRE, next read 96% | new card, `escalation_without_target = 1` |
@@ -342,16 +355,20 @@ Units sit in the key or the comment; `delivery.md` owns `deliver.cto.hourly_cap`
 | M4.17 | First sell curve, now pool | both prices regime-stamped, `dumped: unknown (regime change)` |
 | M4.18 | Budget exhausted at 1,200 calls | edit within deadline + 5 s, `partial: funding incomplete` |
 | M4.19 | Balance 8% below expected | `partial`, gap text, `transfers out uncounted` |
-| M4.20 | 2,000-record replay through the writer | no record > 18,574 B, all round-trip, index count matches |
+| M4.20 | 2,000 launch records with ordered window events | Versioned records round-trip and obey measured record/event caps; original buyer-only byte sizing is not a limit for the amended schema |
 | M4.21 | Segment pruned under the cap | lookup miss, `no launch record`, `records_pruned > 0` |
+| M4.22 | Transfer 60%, sell 30%; or missing sales interval | No invented 90% sold; partial/unavailable, never CLEARED |
+| M4.23 | Sell, add, sell using §3 convention | Original-unit disposal and current inventory tracked separately; current-holdings guard may withhold CLEARED |
+
 ## 11. Open questions
 1. **`solAmount` and the first trade.** `feed.md` already normalises to `sol_lamports` + `sol_source` (`Payload` / `ReserveDelta`); `solAmount` is observed but not guaranteed, so the `ReserveDelta` fallback is part of the contract. Remaining: the first trade on a mint has no prior reserve snapshot, so it takes the create payload; pin that and both payload shapes in the M1 fixture test.
-2. **Multiple buys per wallet in the window.** First buy only, consistent with "first observed balance". Measure in M1; if common, extend both sides together, never one.
+2. **Multiple buys per wallet.** First buy fixes the original weight/bag; all later buys and sells update inventory under §3. Retaining only the first buy is insufficient for sold-share accounting.
 3. **Persist tier high-water?** Yes. Without it a restart can drop a CLEARED escalation, which the escalation rule in §2B forbids.
 4. **Post-then-edit, not hold for funding.** Holding ~2 min breaks the CTO latency contract for a status field.
 5. **Origin probe after migration.** The PDA may be closed for old mints; fall back to `origin unknown`, never guess `pumpfun`.
 6. **CTO retention is a sample of one** (SCOPE §11). 30-day TTL plus high-water, `suppressed_by_high_water` visible; revisit in a month.
 7. **Fan-out cap 50 is invented.** Ship it, log the per-CTO distribution, set the cap from it next revision.
 8. **CTO trade subscription.** While tracked, unsubscribe at `tracker_ttl_s`; the card states the observation window either way.
-9. **Sells before observation.** Print `observed since <time>`; the reconciliation gap is the only evidence of a miss.
+9. **Sells before observation.** Without complete retained history, print sold share unavailable or an observed lower bound and withhold CLEARED. A current balance is not proof of a sale.
 10. **Near edits off.** Keep SCOPE's default; a near edit spends a token on the least actionable tier.
+

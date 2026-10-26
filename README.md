@@ -3,8 +3,8 @@
 A Discord alert bot for Solana meme tokens. Rust for the data path, latency as the design axis,
 built from scratch.
 
-**Status: scope revision 5 (capture and replay, hot failover, wallet exits) after the scope
-additions of 2026-10-25, no code yet. Next: M1.**
+**Status: scope revision 6 (accounting, spend enforcement, complete replay inputs and alert
+freshness), 2026-10-25. No code yet. Next: M1a collector, then M1b staging alert.**
 
 The contract is [SCOPE.md](SCOPE.md). The review that reshaped it is [REVIEW.md](REVIEW.md), the
 public projects it was checked against are catalogued in [docs/references.md](docs/references.md),
@@ -22,13 +22,12 @@ threshold.
 
 **CTO, with bundle status.** DexScreener's community-takeover list, filtered to Solana and diffed,
 worded as a claim on a curated feed. The card adds bundle status: wallets funded by the same
-funder (direct or one hop) that bought inside the ~10 s launch window, tracked as the SOL-weighted
-share of their bags sold — 60% near, 80% fire, 95% cleared, escalating by editing one card. A
+funder (direct or one hop) that bought inside the ~10 s launch window, tracked as original token fractions sold, weighted by original SOL cost — 60% near, 80% fire, 95% cleared, escalating by editing one card. A
 token with no launch record says so; it never shows a confident 0%. Repeated Jito tip payers are
 recorded as corroborating evidence for a bundle, never as a membership rule on their own.
 
 **Gainer wallets.** The previous week's most profitable wallets on pump.fun, reconstructed
-on-chain: realised SOL profit on execution time where resolved (receive time otherwise, labelled),
+on-chain from opening checkpoints plus ordered trade deltas: realised SOL profit on execution time where resolved (receive time otherwise, labelled),
 average cost in lamports, sybil clustering, at least two profitable mints with ≥ 1 SOL deployed
 each, mark-to-market at close. Top ~40 wallets form a watch set that is persisted and reloaded at
 boot; it is a discovery set, not a delivery promise — at ~3 entries per wallet per day it yields
@@ -38,20 +37,19 @@ only fire "entered"; exits fire `EXITED` on their own rule. Funder clustering fo
 rule; a public detector's 5-children-in-5-minutes default is recorded as a second opinion, not
 adopted.
 
-**Wallet exits.** A watched wallet's position fires one `EXITED` card when cumulative sells reach
-90% of the position's peak (PRIOR) and proceeds reach 1.0 SOL. The card shows the sold share and
-whether the position is closed, realised SOL against the observed average cost with estimated
-fees, hold time, and entry versus exit price. Only positions live matching saw open are eligible
-while pairing is on, because the bot cannot show a cost basis it never observed; one episode fires
-once, transfers out are not exits, and exits share the wallet budget (sub-capped at 3/h) and rank
-above entries. *Revision 5.*
+**Wallet exits.** One `EXITED` candidate when a completely observed position is depleted by
+90% from peak and sale proceeds reach 1 SOL (priors). Every buy and sell updates the same
+average-cost ledger as ranking. Transfers or missing opening basis suppress percentage exits;
+adds after sells do not corrupt PnL. Opening observation and successful entry-alert delivery
+are separate card fields. Exits share the wallet budget and expire after 30 s. *Revision 6.*
 
 **Coverage is bounded and stated.** Trades are metered per mint, so the bot watches a chosen subset.
 Every ranking and card says which subset it was computed over. Trade spend is one total
 per-UTC-day budget, `gate.feed_sol_per_day` (prior 0.5 SOL/day), that includes launch windows —
 there is no launch-window exemption. At 0.5 SOL/day the budget is ~500,000 messages/day, ~5.8 msg/s
-sustained, so it binds long before the subscription cap; when it is hit, new subscriptions and
-launch windows are refused and `gate.budget_hit` is counted.
+sustained, so it binds long before the subscription cap; when the local stop threshold is hit, all paid mint and account subscriptions stop and new
+paid commands are refused. Durable reservations survive restart. Provider teardown exposure is
+measured separately; the local allowance is not a guaranteed exact billing ceiling.
 
 ## Venues
 
@@ -85,9 +83,9 @@ were taken at.
 | DexScreener — pairs | Pool price after migration | HTTP poll | 300 ms + 5–30 s poll interval | Public, rate-limited | M4 |
 | SOL/USD ticker | Display conversion only | WS or poll | 50–200 ms, cached 30–60 s | Free public feed | M2 |
 | Shadow probe | Per-mint trade counts on aligned windows | HTTP RPC sampling | 10-minute windows, minutes behind | ~20 mints per window | M2b |
-| Raw frame capture | Arrival history for replay | Local disk, pre-decode, pre-dedup | Off the hot path; bounded and loss-counted | 2 GiB cap, 14 days, ~60–90 MB/day | M1 |
+| Capture plus input tapes | Arrival history and decision inputs | Local disk, pre-decode/pre-dedup frames plus control/external inputs | Off the hot path; bounded and loss-counted | 2 GiB cap, up to 14 days; trade-only estimate ~60–90 MB/day plus measured state/response overhead | M1–M2a |
 | Second trade feed | Warm standby and failover | Geyser-protocol provider, own decode | 10–100 ms (**U**) | Paid (**U**); client license is a build gate | M6 |
-| Discord webhook | Alerts and edits | HTTPS POST/PATCH | 100–300 ms per call; **admission wait dominates** (up to 6–10 min at budget) | 5 per 2 s observed, not contractual | M1 |
+| Discord webhook | Alerts and edits | HTTPS POST/PATCH | 100–300 ms estimated HTTP; per-kind expiry 15/30/120 s, stale candidates dropped | 5 per 2 s observed, not contractual | M1 |
 
 The chain sets the floor: a ~400 ms slot means no source can beat roughly a quarter second from
 event to process. Everything we add is decode, detection and queueing on top of that.
@@ -100,8 +98,10 @@ generations and session lifecycle — into bounded, checksummed, compressed day 
 can drop and counts it; it never backpressures decode. A missing window is `unrecorded`, never
 zero.
 
-The replay harness runs the **production** decode, dedup, gate, detectors and delivery admission
-under a virtual clock, and writes a decision journal plus a report. It is deterministic: the same
+Complete-decision capture includes starting checkpoints, sanitized config/reloads, external
+responses, timer/control inputs, boot identity and application order. Missing inputs refuse a
+complete replay; changing the gate cannot invent unwatched trades. The harness runs the
+**production** decode, dedup, gate, detectors and delivery admission under a virtual clock, and writes a decision journal plus a report. It is deterministic: the same
 input produces the same report hash ten times. It cannot see what the feed dropped while
 connected, cannot supply outcome labels, and cannot measure delivery; a forward mark over later
 trades is a censored proxy, not precision. Any threshold fitted on a replay carries the train
@@ -122,14 +122,16 @@ dropped with its boundary frames counted. Switch-back needs five minutes of prim
 aligned agreement; disagreement tags alerts but never forces a switch. A flap guard holds the
 authority after three switches in an hour. The RPC shadow stays, because two feeds can share
 upstream infrastructure. The secondary's client must be permissively licensed or generated from
-permissive proto definitions — `yellowstone-grpc` is AGPL-3.0 and must not enter an MIT binary.
+permissive proto definitions. Upstream Yellowstone client and proto directories are Apache-2.0;
+the repository default is AGPL. Verify the pinned package tree rather than reject the client by
+the repository-level label (`docs/failover.md` §14).
 Spec: [docs/failover.md](docs/failover.md).
 
 ## Plan
 
 | Milestone | Ships | Status |
 |---|---|---|
-| **M1 — Skeleton and spine** | Workspace, config, feed session trait, PumpPortal adapter with a pinned payload fixture, subscription gate and ledger, supervisor, watchdog, generations, dedup, registry/lifecycle with eviction, receive-time bucketing, `/health` with boot line and heartbeat, minimal sender (`wait=true`, startup check, outage card), rank-store schema only (writer starts M2a), raw-frame capture recorder. No signal alerts. | Next |
+| **M1 — Three spine slices** | M1a: single-source collector, bounded paid stream, durable spend stop, capture, health. M1b: one real volume signal through staging Discord with freshness. M1c: gate/TTL, watchdog/heal, supervision and checkpoint/delta storage contract. No production alerts. | Next: M1a |
 | **M2a — Delivery proven** | Budgets, hold queue, priority classes, dedup/cooldown, degradation contract, rank-store passive writer, card validator — with synthetic alerts into staging — plus the replay harness core and delivery-admission simulation. | Pending |
 | **M2b — Volume** | Ring and parameters, cohort percentiles, dispersion and participation, cold-baseline path, shadow probe. First real alerts, gated on a backtest report over ≥ 7 recorded days with a train/test split. | Pending |
 | **M3 — CTO** | Poll, Solana filter, diff with persisted high-water `claimDate` and posted-token set, per-mint latch, wording. | Pending |
@@ -137,10 +139,10 @@ Spec: [docs/failover.md](docs/failover.md).
 | **M5 — Wallets, entries and exits** | Ranking job, watch-set snapshot and boot reload, account subscription, buy matching, pacing, exit matching and the `EXITED` card with pairing and cost basis. Gated on the post-migration coverage test and a wallet/exit replay report. | Pending |
 | **M6 — Hot failover** | Secondary provider adapter with own decode, warm-standby pipeline, arbitration, switchover records, per-source dedup and ledgers, two-source capture and replay, copyleft dependency gate. | Pending |
 
-M1 acceptance is numeric: events/min against a reference count, N forced disconnects producing N
-reconnects, N outage identities and one outage card (or N edits with readback enabled), and zero
-duplicates after replay, measured watchdog false positives over 24 h, no subscription leak, zero
-allocations per trade after warmup, gap-heal success and declared-unhealed rates.
+M1 first proves one full staged alert and measures coverage, spend-stop exposure, bytes/day,
+latency, allocations and memory at a stated rate. Failure drills then prove reconnects,
+generation drops, bounded heal, leak-free subscriptions and capture recovery. Production volume
+still needs the seven-day M2b report; an early staging card does not waive that gate.
 
 ## Agents and skills by section
 
@@ -172,24 +174,16 @@ verifiable tasks, and `agent-skills:constraints` is run before M1 to write the q
 
 Rust workspace, single binary, tokio.
 
-```
+```text
 crates/
-  feed/        Feed session trait, PumpPortal adapter, secondary/Geyser adapter, per-adapter
-               decode, supervisor, watchdog, generations, dedup, shadow probe, failover
-               controller, warm-standby pipeline
-  gate/        Which mints get trades: subscription planner, per-source ledgers, caps,
-               unsubscribe on prune
-  registry/    mint state and lifecycle, ring ownership, eviction, tombstones, regime resets
-  detect/      volume anomaly, bundle status, CTO, wallet-hit, wallet-exit
-  wallet/      watch set, wallet stats, live buy and exit matching
-  rank/        rolling 7-day aggregates, weekly snapshot job, switchover coverage records
-  enrich/      funding and balance reads, cache, TTLs
-  deliver/     serialized queue per webhook, token bucket, hold queue, circuit breaker
-  capture/     raw-frame recorder, segments, manifest, capture-gap accounting
-  replay/      virtual clock, deterministic replay, delivery simulation, reports (offline)
-  config/      thresholds, budgets, caps, timeouts, provenance records
-  bin/         wiring, health, supervisor tree, shutdown, replay subcommand
+  ocw/         CLI, wiring, health, shutdown, offline replay
+  ocw-core/    feed, gate, registry, detect, position, rank, enrich, deliver,
+               storage, capture, replay and config modules
 ```
+
+Start with modules in one library and a single binary. Extract crates when reuse, dependency
+isolation or measurements justify them. Position accounting has one implementation; storage
+is background-only and its physical format is fixture-tested before being frozen.
 
 Decode and detection share one task per source so the borrow from the frame stays valid; there is
 no trade channel. Channels after detection are classed snapshot, delta or event, because a dropped
@@ -206,12 +200,13 @@ and a raw Geyser feed can be added without touching the primary adapter.
 | Upstream feed → process | 100–500 ms |
 | Decode + detect | 5–15 µs typical |
 | Bucket close | 0–15 s |
-| Budget admission | up to 6 min at 10/hr, up to 10 min at 6/hr; first 2–3 of a cluster immediate |
+| Budget admission | only until per-kind expiry: near 15 s, fire/entry/exit 30 s, CTO/bundle 120 s; first 2–3 can be immediate |
 | Discord POST | 100–300 ms |
 
 Rust buys headroom at pump.fun rates; it does not make the feed faster or Discord less
 rate-limited. The dominant waits are upstream, the bucket window, and our own attention budget —
-and the budget is the largest of the three, which is a product decision, not a technical one.
+and cap pressure is a product decision measured through suppression and age, not hidden by
+posting minutes-old signals.
 
 ## Resilience
 
@@ -233,9 +228,8 @@ source is authoritative.
 Three webhooks, separate queues and budgets (10/hr volume, 6/hr wallets with a 3/hr exit sub-cap,
 `deliver.cto.hourly_cap` 20/hr, with `deliver.cto.daily` 120 as an outer guard), daily caps as the
 real attention limit for volume and wallets. Priority is status/outage > CTO listing > wallet exit >
-wallet entry > bundle edit > volume fire > volume near. Non-urgent cards wait a 45 s reordering hold
-(`deliver.hold.window_ms`), separate from the 6–10 minute budget wait (`deliver.budget_wait_max_ms` =
-600,000 ms). Heartbeat and outage/status cards are the status lane and bypass both budgets; for
+wallet entry > bundle edit > volume fire > volume near. Non-urgent cards have a 5 s reordering hold, separate from per-kind expiry: near 15 s,
+fire/entry/exit 30 s, CTO/bundle 120 s. A stale candidate is counted and dropped before sending. Heartbeat and outage/status cards are the status lane and bypass both budgets; for
 bundle cards only Fire and Cleared transitions edit. Every post uses `wait=true` so the id exists
 for edits; errors are classified by status plus Discord code, because a breaker on all 4xx mutes a
 channel after one deleted card. Posts are at-most-once per process; ambiguous POSTs are logged and
@@ -264,7 +258,9 @@ production.
 | R9 | Signal math in SOL; USD is display only. |
 | R10 | Backtests replay recorded arrivals: capture raw frames from M1, run production code under a virtual clock, fit only with a train/test split and a report hash. No precision, recall or base rates. |
 | R11 | Failover is a second provider with a warm standby, one authoritative source, wholesale role swaps, per-source dedup, and a copyleft dependency gate. No second PumpPortal socket. |
-| R12 | Exits are one `EXITED` card per observed position episode at 90% of peak and 1.0 SOL proceeds, paired to a seen entry, sharing the wallet budget at a 3/hr sub-cap. |
+| R12 | One exit candidate per complete episode, 90% net depletion and 1 SOL proceeds, incremental average cost, transfer ambiguity suppressed, observed and delivered pairing separated. |
+| R13 | Durable paid-stream spend stop, with provider billing exposure disclosed separately. |
+| R14 | Per-kind freshness deadlines and M1a/b/c slices; modules before separate crates. |
 
 ## References
 
@@ -285,3 +281,4 @@ RPC and the side stores degrade independently.
 
 MIT — see [LICENSE](LICENSE). The secondary feed client is the first dependency that could change
 this: M6 adds a copyleft deny-list to CI and does not start until the dependency tree is clean.
+

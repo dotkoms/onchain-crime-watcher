@@ -1,7 +1,7 @@
 # Data sources — onchain-crime-watcher
 
 Reference for builders and reviewers. As of 2026-10-25. Contract: [`../SCOPE.md`](../SCOPE.md)
-(revision 5, Q1–Q6 / R1–R12). Siblings: `feed.md`, `bundle.md`, `ranking.md`, `operations.md`,
+(revision 6, Q1–Q6 / R1–R12). Siblings: `feed.md`, `bundle.md`, `ranking.md`, `operations.md`,
 `backtest.md`, `failover.md`.
 
 Evidence tags:
@@ -162,8 +162,9 @@ signal never depends on FX.
   commitment; carries slot, `blockTime`, instructions, pre/post balances. The only source here that
   could prove completeness rather than liveness.
 - **Cost:** paid, provider-specific, **U**; own decode required. Not an M1 dependency; it gates M6.
-- **License:** the `yellowstone-grpc` client is **AGPL-3.0** (`references.md` licensing summary).
-  It must not be linked into this MIT binary. M6 ships only with a permissively licensed provider
+- **License:** repository default AGPL-3.0-only; upstream explicitly licenses client and proto
+  directories Apache-2.0. See `failover.md` §14 and upstream LICENSING.md; the standard Rust client
+  is eligible subject to a pinned dependency-tree check. M6 ships only with a permissively licensed provider
   SDK or a client generated from permissively licensed proto definitions, and CI denies copyleft
   licences in the binary's dependency tree (`failover.md` §14).
 - **Latency:** 10–100 ms is an estimate (**U**); measure against the same window as PumpPortal.
@@ -199,7 +200,7 @@ print). M1 pins the key set in a fixture test before detectors depend on it.
 | `traderPublicKey` | **O** | Takers, bundle membership, matching | Participation test unavailable |
 | `tokenAmount` | **O** | Bundle share, supply-normalised measures | Bundle percent unavailable |
 | `solAmount` | **O** (client `state.mjs:67`, `ingest.mjs:78`); observed but not guaranteed | **All volume math, percent sold, PnL** — normalized to `sol_lamports` + `sol_source` | Adapter falls back to the signed vSol delta (`ReserveDelta`); with neither, no signal — the load-bearing field |
-| `newTokenBalance` | **O** (captured; unused by client) | Percent-sold denominator (R4) | Fall back to Σ SOL; semantics **U** until C6 |
+| `newTokenBalance` | **O** (captured; unused by client) | Percent-sold denominator (R4) | Fallback to observed token-size inventory only with complete basis; never infer sold percentage from SOL proceeds; semantics **U** until C6 |
 | `marketCapSol` | **O** | Card cap, ring close, price proxy | Unavailable; do not derive silently |
 | `vSolInBondingCurve` | **O** | Curve price and fill | Curve regime unusable |
 | `vTokensInBondingCurve` | **O** (captured; unused by client) | Curve price `vSol/vTokens` | No curve price; cap is not a substitute |
@@ -267,7 +268,7 @@ Derived values, and how far each travels (label on the card):
 | Market cap | `marketCapSol × SOL/USD` | Two hops from truth; USD age required |
 | Pre-migration depth | `2 × vSol` | Client approximation (**O**); not LP |
 | Bundle share | Σ non-deployer buy `tokenAmount` in window / 1e9 | Lower bound; a bundle inside socket latency is invisible |
-| Percent sold | Σ sell `sol_lamports` / Σ buy `sol_lamports` | Excludes tokens moved elsewhere; says so |
+| Percent sold | Original token fractions disposed, weighted by original SOL cost | Sale proceeds separate; missing history/transfers partial; complete history required for CLEARED |
 | Realised PnL | Lamport average cost from raw buys/sells | Fees estimated; transfers excluded and counted |
 | Pool price | DexScreener `priceUsd` | Third-party index; pin pair, timestamp it |
 
@@ -339,3 +340,4 @@ The PumpPortal key rides in the URL query: redact the URL before logging (`opera
 | Do Bonk.fun or Meteora appear in the launch stream? | Mints outside pump.fun break curve assumptions | Attribute captured creates by program and pair `dexId`; if present, tag launchpad and refuse curve math | C1 |
 | Should Geyser become primary? | Only source that could prove completeness | Not in v1: it is the M6 warm standby, and `prefer = primary` stays the default. Promoting it needs a week of two-source agreement and a written decision | C13, C15 |
 | Which secondary provider passes the license gate? | The M6 adapter is gated on a permissive client or generated proto, not on the transport name | A Geyser-protocol provider whose client is MIT/Apache-2.0, or our own client generated from permissive protos; read the license before any code | C14 |
+

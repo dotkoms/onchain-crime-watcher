@@ -1,10 +1,10 @@
 # operations — process, configuration, observability
 
-Status: design for M1, 2026-10-25. Contract: [`../SCOPE.md`](../SCOPE.md) revision 5 (§4–§9, R5,
+Status: design for M1, 2026-10-25. Contract: [`../SCOPE.md`](../SCOPE.md) revision 6 (§4–§9, R5,
 R8, R10–R12); this file adds runtime shape, key names and procedures and changes no decision.
 Siblings: `feed.md`, `volume.md`, `delivery.md`, `bundle.md`, `ranking.md`, `sources.md`,
 `backtest.md`, `failover.md`. The rank-store
-schema ships in M1; `rank.writer` and `rank.job` start in M2a; the capture recorder ships in M1 and
+checkpoint/delta contract is fixture-tested in M1c; `rank.writer` and `rank.job` start in M2a; the capture recorder ships in M1 and
 replay is offline. Every invented number is **PRIOR** with its reason; contract numbers are marked
 CONTRACT.
 
@@ -25,7 +25,7 @@ Observed, not recorded: counters, histograms, heartbeat, boot line, windowed rin
 disagreement. Recorded, off the alert path: raw frames for replay (`backtest.md`), rank and launch
 records, coverage, CTO high-water. Not recorded: trades as an archive, alert outcomes, message ids,
 dedup state. So no hit rate, precision, recall or base rate; cohort context is only the live
-percentile in RAM (`volume.md` §4); nothing on the alert path is replayable; a restart re-alerts; a
+percentile in RAM (`volume.md` §4); only windows with complete recorded inputs support full decision replay; a restart re-alerts; a
 silent drop is invisible until the M2b shadow. The side stores and the capture tap are off the alert
 path. Left out on purpose: a trade archive, per-event tasks, and every metric requiring outcome
 labels. Backtesting (capture plus offline replay) and hot failover (a second provider, M6) are in
@@ -71,8 +71,8 @@ feed.session[s] feed.pipeline[s] + heal jobs    + ledger[p]   (semaphore,  (fram
 | `delivery.{volume,wallets,cto}` + `status` | 4 | queues, buckets, ids, breaker, outage identity | alerts/state → POST/PATCH | 100–300 ms HTTP; admission wait dominates; status 1/5 s |
 | `heartbeat` + `health.server` + `deadman` | 3 | heartbeat ref, snapshot, ping | timer/GET → edit/ping | edit/5 min; local GET; ping/60 s |
 
-M1 ships the rank-store schema, row format and coverage journal; `rank.writer` and `rank.job` start
-in M2a, so M1 acceptance exercises no rank task. M1 also ships `capture.writer`; replay is an
+M1c defines the logical checkpoint/delta contract, versions and coverage journal; `rank.writer` and `rank.job` start
+in M2a, so M1 exercises storage fixtures but no live rank task; M1b does exercise one complete staged volume alert. M1 also ships `capture.writer`; replay is an
 offline subcommand and never a production task. M6 adds the second session and pipeline and the
 failover controller.
 
@@ -153,6 +153,7 @@ boot-only, `H` = hot. Secrets are always `B` and are env-only.
 | `capture.queue_capacity` / `flush_ms` / `manifest_sync_ms` / `compression` / `sources` | records / ms / ms / enum / enum | 4096 / 1000 / 60000 / `zstd-3` / `primary` | bounded tap; crash bound; metadata; ratio; `both` from M6 only | B |
 | `backtest.report_min_days` / `min_candidates` / `train_share` / `max_sweeps` | days / count / frac / count | 7 / 30 / 0.7 / 20 | below these a report says insufficient evidence; sweep budget | B |
 | `backtest.forward_mark_5m_s` / `_1h_s` / `report_sha256_required` | s / s / bool | 300 / 3600 / true | outcome proxy horizons; a report without a hash cannot justify a key | B |
+| `gate.spend_reservation_messages` / `spend_stop_margin_messages` / `spend_ledger_path` | messages / messages / path | 1000 / 10000 / `data/feed-spend.json` | positive; margin < daily allowance; ledger synced, 0600, never pruned; fail closed for paid streams | B |
 | `gate.launch_window_s` | s | 10 | 5–30, equals `bundle.window_ms/1000` | H |
 | `gate.launch_slots` / `max_subs` / `launch_slot_wait_s` | count / count / s | 4 / 20 / 2 | `launch_slots < max_subs`, max 4–64 | H |
 | `gate.retain_ttl_s` / `retain_window_s` / `retain_min_sol` / `keepalive_sol_60s` / `evict_margin` | s / s / SOL / SOL / × | 1800 / 300 / 3.0 / 0.5 / 1.5 | ttl 300–7200, window ≤ ttl, ≥0, ≥0, ≥1.0 | H |
@@ -164,7 +165,7 @@ boot-only, `H` = hot. Secrets are always `B` and are env-only.
 | `volume.cohort.bands.secs` | `[u32;4]` s | 300, 1800, 7200, 21600 | strictly ascending | B |
 | `volume.cohort.p90` / `window.secs` / `min.samples` / `ratio.max` | quantile / s / count / × | 0.90 / 1800 / 200 / 32.0 | 0.5–0.99, 600–7200, ≥50, >fire | H |
 | `volume.cooldown.secs` / `cold.cooldown.secs` | s | 300 / 900 | ≥60, ≥ cooldown | H |
-| `volume.ticker.ms` / `close.batch` / `card.max.age.secs` | ms / count/tick / s | 100 / 64 / 600 | 20–500, 1–256, 60–3600 | B / H / H |
+| `volume.ticker.ms` / `close.batch` | ms / count/tick | 100 / 64 | 20–500, 1–256; expiry owned by delivery | B / H |
 | `bundle.window_ms` / `funding_max_age_s` / `funding_clock_margin_s` / `funding_min_lamports` | ms / s / s / lamports | 10000 / 60 / 15 / 5,000,000 | window = gate window, age 30–120, margin 0–60 | H |
 | `bundle.signatures_limit` / `max_pages` / `tx_reads_max_per_wallet` / `buyers_cap` / `write_channel` | sigs / pages / reads / buyers / records | 1000 / 2 / 4 / 256 / 4096 | 1–1000, 1–10, 1–10, 16–1024, power of two | H |
 | `bundle.min_wallets` / `min_sol` / `min_supply_pct` / `tier_near` / `tier_fire` / `tier_cleared` | count / SOL / % / % / % / % | 5 / 10.0 / 2.0 / 60 / 80 / 95 | `near < fire < cleared ≤ 100` | H |
@@ -183,13 +184,15 @@ boot-only, `H` = hot. Secrets are always `B` and are env-only.
 | `rank.job_cron` / `rank.store_dir` / `rank.job_cache_dir` | cron / path / path | Mon 00:00 UTC / `data/rank` / `data/rank/jobs` | parses; inside data dir; writable | B |
 | `wallet.chunk_keys` / `position_memory_ms` / `touched_cap` / `min_buy_sol` | keys / ms / entries / SOL | 100 / 86400000 / 100000 / 0.25 | 1–100, cap ≥10000; pacing uses `deliver.wallets.cooldown_ms`, one knob | H |
 | `wallet.add_alert` | bool | false | watch-set additions post nothing; the discovery set grows silently | H |
-| `wallet.exit_share_bp` / `exit_dust_bp` / `min_exit_sol` / `exit_require_entry` | bp / bp / SOL / bool | 9000 / 500 / 1.0 / true | 90% of peak sold is an exit; 5% remaining is closed; dust proceeds are not information; pairing keeps the basis honest (`ranking.md` §9) | H |
+| `wallet.exit_share_bp` / `exit_dust_bp` / `min_exit_sol` / `exit_require_entry` | bp / bp / SOL / bool | 9000 / 500 / 1.0 / true | 90% net depletion with complete lineage; unknown transfers suppress; observed/delivered pairing separate (`ranking.md` §9) | H |
 | `deliver.wallets.exit_hourly` | posts/h | 3 | shares the 6/h wallet bucket; exits cannot take more than half of it | H |
 | `deliver.{volume,wallets,cto}.webhook_url` | secret url | — | `https://discord.com/api/webhooks/{id}/{token}` | B |
 | `deliver.staging.{volume,wallets,cto}.webhook_url` | secret url | — | same shape, different id from production | B |
 | `deliver.{volume,wallets,cto}.channel_id` | id | — | boot-only; required when `deliver.readback.enabled` | B |
 | `deliver.{volume,wallets}.{hourly,daily,bucket_capacity}` / `deliver.cto.{hourly_cap,daily,bucket_capacity}` / `deliver.volume.{fire_reserve_per_hour,near_share_max}` | posts/h / posts/d / posts / posts/h / frac | 10/6/20 · 40/20/120 · 3/2/2 · 2 / 0.30 | hourly ≥ burst, daily ≥ hourly, share 0–0.5 | H |
-| `deliver.hold.window_ms` / `budget_wait_max_ms` / `edit.min_interval_ms` / `edit.retry_max` / `http.timeout_ms` / `breaker.probe_ms` / `queue.capacity` / `ids.capacity` / `card.max_chars` | ms / ms / ms / tries / ms / ms / cands / refs / chars | 45000 / 600000 / 45000 / 3 / 5000 / 60000 / 256 / 2048 / 2400 | hold 30000–60000 (near and wallet only), budget wait ≥ hold, edit 30000–60000, chars ≤2400 | H |
+| `deliver.hold.window_ms` | ms | 5000 | 0–10000, less than entry/near expiry; eligibility delay only | H |
+| `deliver.max_age.volume_near_ms` / `volume_fire_ms` / `wallet_entry_ms` / `wallet_exit_ms` / `cto_ms` / `bundle_edit_ms` | ms | 15000 / 30000 / 30000 / 30000 / 120000 / 120000 | positive; reorder hold below applicable age; edits retain original transition time | H |
+| `deliver.edit.min_interval_ms` / `edit.retry_max` / `http.timeout_ms` / `breaker.probe_ms` / `queue.capacity` / `ids.capacity` / `card.max_chars` | ms / tries / ms / ms / candidates / refs / chars | 45000 / 3 / 5000 / 60000 / 256 / 2048 / 2400 | interval 30000–60000; retry never extends freshness | H |
 | `deliver.volume.cooldown_fire_ms` / `_near_ms` / `wallets.cooldown_ms` / `wallets.dedup_ttl_ms` / `cto.dedup_ttl_ms` | ms | 300000 / 1800000 / 10800000 / 86400000 / 2592000000 | near ≥ fire; wallet 1–4 h | H |
 | `deliver.readback.enabled` / `readback.bot_token` | bool / secret | false / — | token required if enabled | B |
 | `deliver.health.heartbeat_interval_ms` / `staging.prefix` | ms / text | 300000 / `[STAGING]` | 60000–900000, ≤20 chars | H |
@@ -374,7 +377,7 @@ family. Prefer a stage restart or a hot config change; restart only when the tab
 Precedence CLI > env > file; secrets env-only. Layout: `/usr/local/bin/ocw` → `/usr/local/lib/ocw/
 releases/<sha>/ocw`; `/etc/ocw/config.toml`; `/etc/ocw/ocw.env` (0600);
 `/var/lib/ocw/{rank,launch,rank/jobs,capture}`, `cto_state.json`, `watchset-GGGGGG.json`,
-`exclusions.toml`. Logs go to journald.
+`exclusions.toml`, and durable `feed-spend.json` (never pruned). Logs go to journald.
 
 ```ini
 [Unit]
@@ -408,6 +411,16 @@ the wallet family goes cold rather than reading them, which is safe and goes in 
 
 ## 8. M1 acceptance checklist
 
+Run in the SCOPE M1a/b/c order. M1a proves collection/capture and durable paid-stream stopping;
+M1b proves one real staged volume card and exact freshness expiry; M1c completes the fault drills
+below. No production alerts before M2b. Store size estimates must be replaced by measurements
+for ordered deltas/checkpoints, not reused from the retired cumulative-row layout.
+
+Spend drills include active mint+account shutdown, kill during reservation, corrupt ledger,
+same-day restart and a backward clock step. Capture/replay fixtures include a boot boundary,
+config reload, response tape, initial checkpoint and silent interval ending the report. Delivery
+reports show received candidates, successes/unknowns, cap/age drops and age percentiles per kind.
+
 Run against staging webhooks and a recorded fixture; state rate and window beside every number.
 
 1. Fixture: every captured frame decodes as pinned; a renamed field fails; unknown fields tolerated and counted. Pass: 100%.
@@ -416,7 +429,7 @@ Run against staging webhooks and a recorded fixture; state rate and window besid
 4. Replay: a 10-minute capture three times. Pass: 0 accepted after pass one, `dup_dropped = 2 × accepted`, ring totals unchanged.
 5. Soak 24 h: `watchdog_false_positives ≤ 2`; every watchdog reconnect heals >0 or is counted; no reconnect while the probe says quiet.
 6. Gate 24 h at 0.5 creates/s: `subs_live == subs_desired ≤ max_subs`; no entry older than TTL + 2 reconcilers; `unsub_failed = 0`; every refusal counted.
-7. Allocation: 10k frames after warmup. Pass: allocator delta 0; create path stays in its metadata pool.
+7. Allocation benchmark: 10k frames after warmup; record allocator delta and rate. Zero trade-path allocations remains the M1c optimization target; this benchmark does not block the M1b staging demonstration. Production sizing records any remaining allocation cost.
 8. Heal: 60 s gap over 10 mints with RPC truth. Pass: ≥90% recovered in budget, 100% of over-budget gaps declared, no healed event in a live bucket.
 9. Generations: 1k stale frames after reconnect. Pass: 100% dropped, exact counter, no ring change.
 10. Buckets: trades at t0+14.999 s and t0+15.001 s; +5 s wall-clock step. Pass: buckets 0 and 1, the step moves nothing, the late event is counted and excluded.
@@ -447,4 +460,5 @@ Run against staging webhooks and a recorded fixture; state rate and window besid
 | 6 | One outage card or N identities after N disconnects? (`feed.md` Q3) | Count N identities; without readback post one card and N log records |
 | 7 | Expose `/health` beyond loopback? | Not in v1. If remote, terminate TLS and auth at a reverse proxy; never bind publicly |
 | 8 | Rollback across a rank segment format bump | Refuse in the release note; the old binary must go cold, never guess at new rows |
+
 

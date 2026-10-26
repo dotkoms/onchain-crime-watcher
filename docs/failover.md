@@ -1,6 +1,6 @@
 # Failover — two feeds, one authority
 
-Status: v1 design, 2026-10-25. Contract: [`../SCOPE.md`](../SCOPE.md) revision 5 (§6.4, §9, R11).
+Status: v1 design, 2026-10-25. Contract: [`../SCOPE.md`](../SCOPE.md) revision 6 (§6.4, §9, R11).
 Replaces revision 4's "shadow, not hot failover" with a two-source contract. Siblings:
 `feed.md`, `backtest.md`, `sources.md`, `operations.md`, `ranking.md`, `delivery.md`.
 
@@ -27,7 +27,7 @@ switchover latency plus the frames in flight.
 
 | Option | Transport | What it carries | Latency | Cost | License gate | Verdict |
 |---|---|---|---|---|---|---|
-| Yellowstone Geyser provider | gRPC, server-side filters on the pump.fun program and bonding-curve accounts | Raw transactions and account updates; own decode; slot and `blockTime` | 10–100 ms (**U**) | Paid (**U**) | `yellowstone-grpc` is **AGPL-3.0**; do not link it (see §14) | **Recommended secondary** |
+| Yellowstone Geyser provider | gRPC, server-side filters on the pump.fun program and bonding-curve accounts | Raw transactions and account updates; own decode; slot and `blockTime` | 10–100 ms (**U**) | Paid (**U**) | Client/protos Apache-2.0; server default AGPL; check pinned dependency tree (§14) | **Recommended secondary** |
 | Provider "enhanced" websocket / LaserStream | WS or gRPC, provider-specific | Raw or decoded transactions | **U** | Paid | Verify before use | Fallback if permissive and it carries slot |
 | Public RPC `logsSubscribe` / `programSubscribe` | WS, per-filter | Raw logs; own decode | 400 ms–2 s (**U**) | Free/cheap | Permissive | Degraded secondary: subscription caps, no slot continuity, not a true peer |
 | Second PumpPortal key | WS | Identical | 200–1,000 ms | Double metering | Vendor limit; runbook forbids key/IP rotation | **Rejected** |
@@ -77,7 +77,7 @@ All conditions are evaluated on the failover tick (1 s, PRIOR) and on any source
 
 | Switch | Requires |
 |---|---|
-| Primary → secondary | Secondary `Connected` **and** fresh (`last_event` within `failover.secondary_fresh_s` = 10 s) **and** primary is `Banned`, `Failed`, reconnecting longer than `failover.switch_after_s` (30 s, the outage-declare threshold), or `Suspected` with a probe that disagrees |
+| Primary → secondary | Secondary `Connected`, subscribed to the desired set, all promoted rings ready or explicitly cold **and** fresh (`last_event` within `failover.secondary_fresh_s` = 10 s) **and** primary is `Banned`, `Failed`, reconnecting longer than `failover.switch_after_s` (30 s, the outage-declare threshold), or `Suspected` with a probe that disagrees |
 | Secondary → primary | Primary `Connected` for `failover.switch_back_after_s` (300 s) **and** fresh **and** aligned disagreement over `failover.compare_window_s` (600 s) at or below `feed.shadow.tolerance` (0.05) per stratum **and** switches in the last hour below `failover.max_switches_1h` (3) |
 | Neither | Any of the above fails: stay on the current authority; count `switch_back_blocked{reason}` |
 | Both unhealthy | No authority: feed state `stale`, one `trade_stream` outage identity, alerts suppressed, outage card; the process and the other families continue |
@@ -276,7 +276,7 @@ dollar cap is invented before M6's C14 records real pricing. The PumpPortal budg
 
 | # | Test | Pass condition |
 |---|---|---|
-| FO1 | 20 forced primary failures (close, ban, silent stall) at random times, secondary healthy | Each switches within `switch_after_s + 5 s`; `switches_total = 20`; one outage identity; no alert lost or duplicated |
+| FO1 | 20 forced primary failures (close, ban, silent stall), secondary ready; space trials beyond flap cooldown | Each switches within `switch_after_s + 5 s`; switches counted; no duplicated eligible alert; boundary loss, cap drops and freshness expiry accounted separately; outage identity only when no authority remains |
 | FO2 | 20 forced secondary failures | No switch; `secondary.state` cycles; alert stream unchanged; no card |
 | FO3 | Both providers down 5 min | `authoritative = none`, one outage card, zero alerts, recovery switches once and edits the card |
 | FO4 | Alternating failures every 60 s | ≤ 3 switches in the hour, then `flap_guard`; no ring merge; no duplicate candidate |
@@ -291,6 +291,11 @@ dollar cap is invented before M6's C14 records real pricing. The PumpPortal budg
 | FO13 | Card footer | For 600 s after a switch every card names the source and the switch age; after 600 s it does not |
 | FO14 | Ban on primary and secondary | No authority, no sockets reopened before each provider's own `banned_until`, no key/IP rotation |
 
+FO9 uses the controller replay mode in `backtest.md`: both source histories stay isolated, while
+control inputs and switches share a logical application order. Single-source mode cannot claim
+to validate arbitration. New POSTs still obey their original freshness deadline after a switch.
+Promotion does not reconstruct a missing wallet basis; transfer/incomplete episodes stay unpaired.
+
 ## 13. Cost, stated
 
 | Item | Estimate | Notes |
@@ -303,18 +308,19 @@ dollar cap is invented before M6's C14 records real pricing. The PumpPortal budg
 
 ## 14. Licensing gate
 
-`docs/references.md` already records that **`yellowstone-grpc` is AGPL-3.0 and must not be copied
-into our binary**. Linking that client would impose AGPL-3.0 obligations on the combined binary,
-which the project's MIT grant does not satisfy. The secondary adapter therefore ships only if one
-of these is true:
+Verified 2026-10-25: upstream [LICENSING.md](https://github.com/rpcpool/yellowstone-grpc/blob/master/LICENSING.md)
+states the repository default is AGPL-3.0-only, but `yellowstone-grpc-client`,
+`yellowstone-grpc-client-nodejs`, `yellowstone-grpc-proto` and examples are **Apache-2.0**.
+The Rust [client manifest](https://github.com/rpcpool/yellowstone-grpc/blob/master/yellowstone-grpc-client/Cargo.toml)
+and [proto manifest](https://github.com/rpcpool/yellowstone-grpc/blob/master/yellowstone-grpc-proto/Cargo.toml)
+also declare Apache-2.0. Revision 5's blanket client prohibition was incorrect.
 
-1. The provider's client SDK is permissively licensed (MIT/Apache-2.0) and can be linked; or
-2. The gRPC client is generated from proto definitions whose license permits it, with our own
-   runtime code and no copied AGPL source.
-
-The build adds `cargo deny` (or `cargo license`) to CI with a deny-list of copyleft licenses for
-the binary, and `docs/references.md` records the client, version and license read at M6 time.
-This is a **build gate**, not a note: M6 does not start until the dependency tree is clean.
+M6 may use the standard client after recording the exact package versions, source revision,
+component license files and complete locked dependency tree. CI runs `cargo deny` against that
+tree with the project's permissive-license policy. Do not copy the AGPL server implementation
+into the bot. A generated client is an option, not a workaround required by the current client
+license. Recheck upstream at dependency selection; these moving links are evidence for the plan,
+not a substitute for pinned release evidence.
 
 ## 15. Open questions
 
@@ -328,3 +334,4 @@ This is a **build gate**, not a note: M6 does not start until the dependency tre
 | 6 | Per-source dedup memory | Keep two sets; sharing loses trades | Measured dedup memory above 32 MB per source at peak |
 | 7 | Secondary provider caps | Measure `filters` and events/s in C14 before fixing `feed.secondary.filters` | A provider limit below the desired set, forcing a gate change |
 | 8 | Requirement flag | Default `require_secondary = false`; production sets true once the provider is proven | An operator runs production single-source and believes failover is on |
+

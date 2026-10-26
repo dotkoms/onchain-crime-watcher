@@ -3,7 +3,9 @@
 Date: 2026-10-25. **Historical: this review evaluates revision 4.** Revision 5 of
 [`SCOPE.md`](SCOPE.md) adds capture and replay backtesting, hot failover between providers, and
 wallet exit alerts, so its "no hot failover" and "no backtest harness" statements describe the
-scope at review time, not the current contract. Read-only review of `SCOPE.md` and `README.md` by
+scope at review time, not the current contract. Revision 6 additionally corrects accounting,
+spend stopping, replay prerequisites, delivery freshness and Yellowstone component licensing;
+see SCOPE.md §0 for the current decisions. This historical review is not acceptance of revision 6. Read-only review of `SCOPE.md` and `README.md` by
 five reviewers with separate
 lenses: statistical accuracy, Discord delivery, pipeline architecture, Rust latency, and data-source
 provenance. This file consolidates their findings, collapses overlaps, and records where they
@@ -325,3 +327,4 @@ Section 2C, Q2. Statistics and provenance reviewers.
 - Helius credit prices and tier limits were read today and should be re-checked at build time.
 - DexScreener's CTO list was fetched live today; its retention window is a sample of one, not a
   guarantee.
+

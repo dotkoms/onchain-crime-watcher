@@ -4,7 +4,7 @@ A Discord alert bot for Solana meme tokens. Rust for the data path, latency as t
 Built from scratch; `~/Projects/volume-scanner` is a reference for observed payload behaviour and
 hard-won lessons only — no code is carried over.
 
-Status: revision 5, 2026-10-25, scope additions after revision 4: capture and replay
+Status: revision 6, 2026-10-25, planning corrections after review of revision 5: capture and replay
 backtesting, hot failover between feeds, and exit alerts for watched wallets, all in v1. No code
 until explicit go on M1.
 
@@ -80,6 +80,24 @@ until explicit go on M1.
     M6 adds a copyleft deny-list to CI and does not start until the dependency tree is clean.
   - Not in scope is rewritten rather than deleted: a backtest of a period the bot did not record,
     paper trading, and execution remain out.
+
+- **2026-10-25 — revision 6 (build-readiness corrections).** Supersedes conflicting revision
+  3–5 descriptions below; historical log entries remain historical.
+  - Bundle sold share weights original token fractions by original SOL cost, never sale proceeds.
+    Wallet exits reuse incremental average-cost accounting; transfer ambiguity suppresses them.
+  - Weekly ranking reconstructs opening checkpoints and ordered deltas, excluding pre-window
+    realised profit while retaining the basis of carried inventory.
+  - Paid-stream exhaustion stops existing mint and account subscriptions; durable reservations
+    survive restarts. Local allowance and provider-billed spend are separate, with no invented
+    hard upstream charge guarantee.
+  - Replay records starting state, sanitized config history, external inputs, boot identities and
+    effective application order. Two-source controller replay keeps both histories isolated.
+  - Alert expiry is per kind (15/30/120 s), with a separate 5 s reorder hold; delivered entries
+    are distinguished from observed openings. Delivery survival and age are measured before launch.
+  - Yellowstone client/proto directories are Apache-2.0 per upstream LICENSING.md; verify pinned
+    packages and transitive licenses rather than rejecting the client by the repository default.
+  - M1 is split into collector, staging alert and hardening slices. Start with one binary and one
+    library containing modules; independent crates require a measured or ownership reason.
 
 ## 1. What it does
 
@@ -183,11 +201,13 @@ community-takeover list.
   is written to the bounded side store in section 2C's contract: off the hot path, prunable,
   allowed partial. CTOs arrive weeks after launch, so the record must outlive the process. A token
   with no launch record shows `bundle: no launch record`, never 0%.
-- **Percent sold.** SOL-weighted from trade events: opening bag is the first observed balance,
-  sold value is the sum of sell `sol_lamports` (`Payload`, or the derived signed vSol delta where
-  `solAmount` is absent), and the ratio is Σ sold SOL / Σ bought SOL. Wallet count share and
-  absolute SOL are shown beside it. Balance reads are a slow reconciliation, never the headline.
-  Tokens moved to another wallet and sold there are uncounted, and the card says so.
+- **Percent sold.** For each member, compute the observed fraction of original launch-bag
+  tokens sold, then average those fractions weighted by original SOL cost. Sale proceeds are a
+  separate field and cannot advance a tier. Later buys use the proportional original-bag
+  allocation in `docs/bundle.md` §3. Missing history or transfers make the fraction partial;
+  CLEARED needs complete history, ≤5% current holdings and price context. A stored buyer list
+  without sales history cannot establish how much was sold.
+
 - **Minimums.** No tier is shown unless the bundle has ≥ 5 wallets, ≥ 10 SOL bought, and ≥ 2% of
   supply. Below that the granularity is meaningless (a two-wallet bundle cannot reach 60% until
   100%).
@@ -239,28 +259,26 @@ open new positions.
   0.5 SOL/day), which includes launch windows with no exemption. Buys fire "entered"; adds are
   counted and never announced. Sells update the position and are the basis of the exit family
   below.
-- **Exit alerts.** A position fires **one** `EXITED` card when cumulative sold tokens reach
-  `wallet.exit_share_bp` (PRIOR 90%) of the position's peak and cumulative sale proceeds reach
-  `wallet.min_exit_sol` (PRIOR 1.0 SOL). The trigger is `newTokenBalance` on the sell where
-  available (R4), else cumulative sell sizes, with the basis labelled on the card. The card shows
-  the sold share, whether the position is closed (remaining ≤ `wallet.exit_dust_bp`, PRIOR 5% of
-  peak), realised SOL against observed average cost with estimated fees, hold time from the
-  labelled receive-time proxy, entry and exit price, and the wallet's rank. **Pairing:** with
-  `wallet.exit_require_entry` (PRIOR true) an exit fires only for a position live matching saw
-  open; a pre-boot or evicted position is counted `exit_unpaired` and posts nothing, because the
-  bot cannot show a cost basis it never observed. Exits do not fire on transfers out; a balance
-  fall with no matching sell suppresses the exit and is counted. One exit per position episode:
-  dedup is keyed on `(wallet, mint, episode_first_seen, exit)`, and the entry cooldown does not
-  apply to an exit, so an entry and its exit inside three hours are both delivered.
-- **Dedup and pacing.** Keyed `(wallet, mint, entry, episode_first_seen)` for entries and
-  `(wallet, mint, exit, episode_first_seen)` for exits; entry cooldown 1–4 h per
+- **Exit alerts.** One `EXITED` candidate per completely observed position episode when net
+  inventory depletion from peak reaches 90% (PRIOR) and observed proceeds reach 1.0 SOL (PRIOR).
+  All buys and sells update the same integer average-cost ledger used for ranking. Realised
+  profit is accumulated per sell, never total spending multiplied by depletion. An unexplained
+  balance change suppresses percentage exits for that episode; transfers cannot become sold
+  tokens. Remaining inventory, cost-basis mode, fees and source coverage are stated.
+  With `wallet.exit_require_entry=true`, opening observation is required. Successful entry
+  delivery is a separate fact: cards say `entry delivered at <time>` or `entry observed; alert
+  not delivered`. After restart or eviction, basis is unknown until a verified zero and a new
+  opening. With pairing off, unknown-basis activity is `SELL OBSERVED`, with no percent or PnL.
+
+- **Dedup and pacing.** Keyed `(wallet, mint, entry, episode_id)` for entries and
+  `(wallet, mint, exit, episode_id)` for exits; entry cooldown 1–4 h per
   `(wallet, mint)`. Exits share the wallet channel's hourly and daily budgets with entries, rank
   above them in the queue, and are sub-capped at `deliver.wallets.exit_hourly` (PRIOR 3/h) so an
   exit storm cannot crowd out entries. Suppression is counted, never silent.
 
 **Rank aggregate store.** Realised PnL needs cost basis per wallet per mint over seven days, which
 cannot live in RAM at pump.fun token counts. A bounded store on disk holds per (wallet, mint):
-buys, sells, weighted cost, realised PnL, first/last trade, pruned by age. Each row records the
+ordered normalized trade deltas, opening inventory/cost checkpoints and marks, pruned only when no active window needs them. Cumulative cache rows are not the weekly source of truth. Each row records the
 registry state it was written under — `created | on_curve | near_graduation (display-only) |
 migrated | dead | unknown` — and the `state_seq`; `state_seq` increments on every transition, so a
 stored row can be checked against the mint's current state.
@@ -309,10 +327,10 @@ can be measured:
 | Decode + detect | 5–15 µs typical, < 2 ms p99 | Measured with the rate stated; a p99 without a rate is not a claim |
 | Enqueue | ~0 | Detection and decode share one task; no trade channel |
 | Bucket close | 0 – Δ (0–15 s) | Volume decisions are evaluated when a bucket closes |
-| Budget admission | 0 – 1/rate | 10/hr volume ⇒ up to 6 min; 6/hr wallets ⇒ up to 10 min. Burst capacity 2–3 posts a cluster immediately |
+| Budget admission | Until per-kind expiry | Near 15 s; fire/entry/exit 30 s; CTO/bundle 120 s. Burst 2–3, then stale candidates drop rather than wait for a minutes-late alert |
 | HTTP POST to 2xx | 100–300 ms | Discord, independent of our code |
 | CTO end to end | minutes to hours | Curation on the vendor's side dominates; the poll adds 0–60 s |
-| Feed switchover | 0.1–2 s + one partial bucket dropped | Warm standby is already subscribed and warm; the outgoing partial (≤ 15 s) is dropped, and frames in flight (≤ 1024, ~1 s at peak) are counted and discarded |
+| Feed switchover | Detection + switch_after_s + ≤5 s drill target | Default reconnect threshold is 30 s; measure trigger-to-authority separately from detection. Warm rings are required, and boundary loss is counted |
 | Volume end to end | ~0.5–15 s + admission | From event time |
 
 Instrumentation, required before any of these numbers is repeated: `event_time` where available,
@@ -325,27 +343,19 @@ asserts zero allocations after warmup. A 2× peak saturation run uses `tokio-con
 
 Rust workspace, single binary, tokio.
 
-```
+```text
 crates/
-  feed/        Feed session trait, PumpPortal adapter, secondary/Geyser adapter, per-adapter
-               decode, supervisor, watchdog, generations, dedup, shadow probe, failover
-               controller, warm-standby pipeline
-  gate/        Subscription planner and per-source ledgers: which mints get trades, caps,
-               unsubscribe on prune
-  registry/    mint state and lifecycle, ring ownership, eviction, tombstones, regime resets
-  detect/      volume anomaly, bundle status, CTO, wallet-hit, wallet-exit
-  wallet/      watch set, wallet stats, live buy and exit matching
-  rank/        rolling 7-day aggregates, weekly snapshot job, switchover coverage records
-  enrich/      funding and balance reads, cache, TTLs
-  deliver/     serialized queue per webhook, token bucket, hold queue, dedup, message-id
-               store, circuit breaker
-  capture/     raw-frame recorder, segments, manifest, capture-gap accounting
-  replay/      virtual clock, deterministic replay, delivery simulation, reports (offline)
-  config/      thresholds, budgets, routing, timeouts, backoff, caps, provenance
-  bin/         wiring, health, supervisor tree, graceful shutdown, `replay` subcommand
+  ocw/         Binary: CLI, wiring, health, shutdown and offline replay subcommand
+  ocw-core/    Library modules: feed, gate, registry, detect, position, rank, enrich,
+               deliver, storage, capture, replay and config
 ```
 
-Rules that apply across crates:
+These are logical boundaries, not twelve mandatory packages. Keep one normalized trade model
+and one position-accounting implementation. `storage` owns bounded background persistence;
+capture keeps raw bytes separately. Extract a module into a crate only for independent reuse,
+dependency isolation or measured build/runtime needs. No microservice split in v1.
+
+Rules that apply across modules:
 
 - **One decode + detect task per source.** Frames are decoded from `&bytes` and detection runs in
   the same stack frame, so the borrow stays valid. There is no trade channel: a borrowed struct
@@ -373,7 +383,7 @@ Rules that apply across crates:
 - **Capture is a tap, not a dependency.** The pipeline clones the frame handle into a bounded
   capture channel; recording may drop and count, never backpressure decode, and no alert path
   reads a capture file. Replay links the production crates and shares no state with the live
-  process.
+    process.
 - **Supervision.** `panic = "unwind"`, every long-lived task's `JoinHandle` retained in a
   `JoinSet`; a panicked stage is respawned with jittered backoff under a restart budget, then the
   stage goes red and stops. Shutdown via `CancellationToken`; the sender flushes with a deadline
@@ -404,8 +414,10 @@ So the gate is part of the architecture, not an optimisation:
   `gate.feed_sol_per_day` (**PRIOR** 0.5 SOL/day), including every launch window; there is no
   launch-window exemption. At 0.5 SOL/day the budget is ~500,000 messages/day, ~5.8 msg/s
   sustained, so the spend cap binds long before the 20-slot concurrent-subscription cap. When it is
-  hit, new subscriptions and launch windows are refused and `gate.budget_hit` is counted. Open
-  question: confirm the spend budget, because it determines how many mints can be watched.
+  hit, every paid mint and account subscription stops, new paid commands are refused, and
+  `gate.budget_hit` is counted. Durable per-day reservations prevent reset by restart. Teardown
+  margin and actual provider overshoot are measured; this local allowance does not guarantee an
+  exact upstream billing ceiling. See `docs/feed.md` §3.3. Confirm the allowance before production.
 - **Caps and TTL.** A hard cap on concurrent subscriptions (prior 20 slots), a per-mint TTL,
   unsubscribe on prune, and a reconcile task. `subs_live`, `unsub_failed`, `subs_capped`,
   `events_per_sec` and `estimated_sol_per_day` are config values and `/health` counters.
@@ -604,11 +616,13 @@ wallet entry > bundle edit > volume fire > volume near. An exit outranks an entr
 position it describes is already open and the reader was told about it; both share one wallet
 budget, and the exit sub-cap stops an exit storm from starving entries. A token bucket alone is
 first-come-first-served. Non-urgent
-cards — volume *near* and wallet entries — wait in a reordering hold of `deliver.hold.window_ms` =
-45,000 ms; this is separate from `deliver.budget_wait_max_ms` = 600,000 ms, the maximum wait for
-budget admission that applies to fire, CTO listings and bundle edits. The 6–10 minute admission
-figure refers to `budget_wait_max_ms` only, not to the hold. The highest class is admitted when a
-token is available. Two of the volume hour's ten tokens are reserved for fire. Priority decides
+cards — volume *near* and wallet entries — have a 5,000 ms reorder hold. It delays eligibility,
+not expiry. `deliver.max_age.<kind>_ms` expires near at 15 s, volume fire and wallet entry/exit at
+30 s, CTO listing and bundle edits at 120 s (PRIOR). Exits are immediately eligible. The sender
+checks age before each attempt, including after 429 pauses, and never extends the original
+deadline. Every card shows its age. Candidate survival, successful delivery and age by family/rank
+band are release evidence; observed entries are never described as delivered without POST success.
+The highest eligible class is admitted when a token is available. Two of the volume hour's ten tokens are reserved for fire. Priority decides
 which alert survives a full budget, never whether the budget is exceeded.
 
 **Message ids and edits.** One id store, owned by `deliver/`; detectors keep tiers, not ids. Every
@@ -655,19 +669,23 @@ channels; threads and forums are out.
 Each milestone is shippable and verifiable alone. No milestone starts before the previous one's
 failure behaviour is written down.
 
-1. **M1 — Skeleton and spine.** Workspace, config, feed session trait, PumpPortal adapter with a
-   **payload fixture and pinned schema**, subscription gate and ledger, supervisor, watchdog,
-   generations, dedup, registry/lifecycle with eviction, receive-time bucketing, `/health` with
-   boot line and heartbeat, minimal sender (`wait=true`, startup check, outage card), rank-store
-   schema only (writer starts M2a), and the **raw-frame capture recorder** (pre-decode,
-   pre-dedup, bounded, loss counted) so recorded days exist before any threshold is judged. No
-   signal alerts.
-   *Acceptance:* observed events/min within X% of a reference count over one hour; N forced
-   disconnects produce N reconnects, N outage identities and one outage card (or N edits with
-   readback enabled), 0 duplicate trades after replay; measured watchdog false positives over
-   24 h; no subscription leak over 24 h; zero allocations per trade after warmup; gap-heal success
-   rate and declared-unhealed rate; capture round-trips byte-identically and its manifest gap
-   matches a forced disconnect.
+1. **M1 — Spine in three verifiable slices.**
+   - **M1a collector:** binary/library skeleton, minimal typed config, single PumpPortal session,
+     one bounded paid mint plus free creates/migrations, normalized decode/dedup, durable spend
+     stop, raw capture, health and minimal outage sender. Pin real payload fixtures and measure
+     coverage, bytes/day and teardown exposure. No production signal alerts.
+   - **M1b staging alert:** one complete volume path using §2A priors, registry/ring state,
+     per-kind freshness, a staging webhook and `--dry`; captured fixture and live staged signal
+     produce a readable card. This is the first product demonstration, not a threshold validation.
+   - **M1c hardening:** expand the gate/TTL policy, generations, watchdog/probe, bounded heal,
+     supervision, heartbeat and shutdown; define and fixture the checkpoint/delta storage API.
+     Fault drills and measured saturation precede M2a. Zero-allocation and latency figures remain
+     benchmark targets, not unmeasured claims or prerequisites to the first staging card.
+   *Acceptance:* byte-identical capture; one real staged signal; expiry at the stated boundary;
+   paid-stream stop survives restart; numeric reference-count tolerance set before the coverage
+   run; forced disconnects/recovery and subscription leak tests; measured loss, latency, memory
+   and allocation counts at the stated rate. Production stays gated by M2b's evidence report.
+
 2. **M2a — Delivery proven.** Budgets, hold queue, priority classes, dedup/cooldown, degradation
    contract, rank-store passive writer, card template and validator, exercised with synthetic
    alerts into staging channels; **replay harness core** (virtual clock, same decode/dedup/gate,
@@ -731,22 +749,30 @@ failure behaviour is written down.
     independently; status cards bypass the alert budget. *2026-10-25.*
 15. **R9 — Signal math in SOL.** Dollar display converts with a cached rate and shows its age; the
     signal never depends on an FX feed. *2026-10-25.*
-16. **R10 — Backtests replay recorded arrivals, not chain truth.** Raw frames are captured from M1,
+16. **R10 — Backtests replay recorded inputs, not chain truth.** Raw frames are captured from M1,
     pre-decode and pre-dedup, with receive time, generations and session lifecycle; the replay
     harness runs the production code under a virtual clock and simulates delivery admission. A
     fitted threshold carries `fitted_on`, `tested_on`, `fitted_at` and a report hash, or boot fails.
     A replay cannot yield precision, recall, base rates or delivery latency. *2026-10-25 (revision
     5).*
+    Revision 6 requires starting state, sanitized config/reloads, offline external-response tapes,
+    boot identities and logical application order; unsupported gate/watch-set counterfactuals
+    cannot justify fitted defaults. M6 controller replay uses both isolated histories.
 17. **R11 — Failover is a second provider with a warm standby.** PumpPortal's one-socket limit is
     not bypassed; a second provider runs a full parallel pipeline, exactly one source is
     authoritative at any instant, roles swap wholesale with no merge, and each source keeps its own
     dedup and generations. Switch rules, flap guard, and the copyleft dependency gate are
     `docs/failover.md`. *2026-10-25 (revision 5).*
-18. **R12 — Exits are one card per observed position episode.** `EXITED` fires when sold tokens
-    reach 90% of peak (PRIOR) and proceeds reach 1.0 SOL, only for a position live matching saw
-    open unless pairing is disabled, once per episode, with cost basis labelled or omitted.
-    Exits share the wallet budget, outrank entries, and are sub-capped at 3/h. *2026-10-25
-    (revision 5).*
+18. **R12 — Exits are one candidate per complete observed episode.** Net inventory depletion
+    reaches 90% of peak and proceeds reach 1 SOL (priors). Incremental average-cost PnL, complete
+    opening basis, no transfer ambiguity, separate observed/delivered pairing, shared wallet
+    budget and 30 s expiry are required. See `docs/ranking.md` §9. *Revised 2026-10-25, revision 6.*
+19. **R13 — Durable spend stop.** Existing paid mint/account streams stop at local exhaustion;
+    durable reservations survive restart. Provider billing exposure is measured and disclosed,
+    not guaranteed away. See `docs/feed.md` §3.3. *2026-10-25, revision 6.*
+20. **R14 — Freshness and first slice.** Per-kind expiry, delivery survival reporting, and the
+    M1a/b/c sequence replace minutes of budget waiting and a monolithic skeleton milestone.
+    Logical modules start in one library and binary. *2026-10-25, revision 6.*
 
 Changes get a dated entry here rather than a silent edit.
 
@@ -773,3 +799,4 @@ Changes get a dated entry here rather than a silent edit.
 - Exit alerts depend on `newTokenBalance` semantics (C6) and on live matching having seen the
   entry. A pre-boot position, an evicted state, a transfer-out, or a sale on an unwatched venue
   produces no exit or no basis; the card says which. *Revision 5.*
+

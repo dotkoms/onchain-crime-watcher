@@ -23,45 +23,44 @@ built from the account subscription, never the rank store, and never fabricates 
 
 ## 1. Store schema
 
-| File | Contents | Bound |
+Revision 6 replaces latest-row-wins cumulative aggregates with **opening checkpoints plus
+ordered trade deltas**. A cumulative row alone cannot say which profit was realised inside a
+seven-day window. The storage module is one background writer; physical encoding and index
+layout are selected in M1 from a measured fixture, not fixed byte offsets in this plan.
+
+| Record | Required fields | Purpose |
 |---|---|---|
-| `rank/seg-NNNNNN.rcr` (+ `.idx`, 8 B/record, rebuildable) | one UTC day of 192 B records (crc32c over the first 188), append order; 32 B header: magic `RSEG`, version, day_start_ms, crc32c | 10 + today |
-| `rank/coverage.jrn` | coverage journal, §6 | ~55 KB/day |
-| `rank/mints.tbl` | mint 32, volume_lamports 8, trades u32, venue_mask u16, flags u16 = 64 B | ~20k mints → 1.3 MB |
+| Trade delta | event id, wallet, mint, side, raw token quantity, gross SOL leg, fee estimate/resolution, receive time, optional execution time, source, boot/session, ingest sequence, registry state and state_seq | Reconstruct chronological buys and sells; immutable, idempotent by event id |
+| Opening checkpoint | wallet, mint, boundary time, tokens held T, remaining cost C, lifetime realised R, counts, provenance, last applied event id | State immediately before a UTC day; never includes events at or after its boundary |
+| Mint mark | mint, timestamp, price, regime, source, freshness | Last eligible price strictly before a ranking close |
+| Coverage | gaps, ticks, boots, shutdowns, switchovers (§6) | Refuse an incomplete ranking rather than fabricate history |
+| Candidate RPC cache | job close, wallet/mint, request identity, response hash and response | Reproduce fee, balance and clustering decisions |
 
-Key = wallet ‖ mint.
+The job loads a checkpoint at or before the window start, applies intervening deltas to build
+opening inventory, then resets **window** realised profit to zero. Only sales in
+`[close − 7d, close)` contribute realised profit; pre-window buys retain their remaining basis.
+Each event has a stable total order; receive time is the bulk proxy, and any resolved execution
+time correction triggers recomputation of the affected wallet/mint, not a timestamp edit on a
+cumulative row. Missing opening history sets `basis_incomplete` and excludes the row.
 
-| Field (offset) | Type | B | Notes |
-|---|---|---|---|
-| wallet (0), mint (32) | [u8;32] ×2 | 64 | key; base58 only at the card |
-| first_ts_ms (64), last_ts_ms (72) | u64 ×2 | 16 | receive time; block time where resolved (§3); drives prune |
-| buy_lamports (80), sell_lamports (88), buy_count (144), sell_count (148) | u64 ×2, u32 ×2 | 24 | gross curve leg, fees excluded |
-| tokens_bought (96), tokens_sold (112), tokens_out (128) | u128 ×3 | 48 | raw units; `out` from reconciliation |
-| episodes (152), venue_mask (154), flags (156), reserved (158) | u16 ×4 | 8 | venues b0 curve/b1 pumpswap/b2 raydium/b3 unknown; flags 0x1 transfer_out, 0x2 in, 0x4 creator, 0x8 bundle, 0x10 basis_incomplete, 0x20 stale, 0x40 mismatch, 0x80 excluded, 0x100 ts_resolved |
-| cost_lamports (160), realised_lamports (168), balance_raw (176) | u64, i64, u64 | 24 | advisory; last `newTokenBalance`; drift counted |
-| crc32c (184) | u32 | 4 | over the first 188 B |
-| reserved_tail (188) | u32 | 4 | zero-filled; record length 192 B |
+**Allocation filters.** Minimum position and mint-volume floors decide ranking eligibility,
+not which earlier cost-basis events may be discarded. Keep bounded pending histories until the
+mint/position qualifies. A pending overflow or expiry makes that basis incomplete; later buys
+cannot silently turn it into a complete history. Cache aggregates may accelerate the job but are
+rebuildable from checkpoints and deltas.
 
-**Allocation filters.** A row exists only if the mint passes `rank.mint_volume_floor_sol`, cumulative
-buys reach `rank.min_position_sol`, and the mint is not tombstoned. Events below the mint floor wait
-in a 16-event ring (1.5 MB total); sub-threshold buys wait in a pending map capped at 200k entries
-(9.6 MB), overflow counted.
+**Retention and bounds.** Keep 10 days of deltas and the last complete checkpoint needed before
+the oldest permitted window start. `rank.row_cap_bytes` (512 MiB PRIOR) includes events,
+checkpoints and indexes. Measure bytes/event and events/day in M1; the old 192-byte aggregate-row
+sizing is withdrawn. Prune only history no active window needs. If the cap cannot preserve a
+complete opening checkpoint plus the seven-day window, stop accepting rank writes, open a
+coverage gap, and refuse the job. Never silently shorten the ranking window or look-back.
 
-**Sizing.** `bytes ≈ rows_day × retention_days × 192 × 1.08`, `rows_day = launches_day × P(mint ≥ floor) × buyers_≥min`.
-PRIOR: 20,000 launches/day (0.23/s), 0.10 pass the 10 SOL floor, 30 buyers ≥ 0.5 SOL ⇒ 60,000 rows/day; at 10 days, **119 MiB**.
-At 0.30 and 40 buyers, 240,000 rows/day = **474 MiB** — 7% under the 512 MiB cap; beyond it the cap shortens retention, never the window.
-
-**Pruning.** Whole segments only, oldest first, when the day ends before `now − rank.retention_ms`,
-then when bytes exceed `rank.row_cap_bytes`; a segment intersecting the active window plus look-back
-is never dropped — coverage is declared partial and the look-back shortened instead.
-
-**Writes (live from M2, R7).** Updates coalesce in a `HashMap`; flush every 2 s or 4,096 dirty rows sorted by key;
-`fdatasync` every 30 s; clean shutdown writes `SHUTDOWN`. A crash loses ≤ 30 s and boot opens a gap
-over it, so it is never covered.
-
-**Corruption.** Bad crc ⇒ skip record, count. Bad header or idx ⇒ truncate to the last good record,
-copy to `.quarantine`, mark the day partial; above 1% bad records the segment is excluded. Every
-quarantine appears in `/health` and the job report.
+**Writes and crash recovery.** Updates batch every 2 s or 4,096 deltas, with a durable high-water
+sequence and coverage tick synced at most 30 s apart. A crash opens a gap from the last durable
+tick. Checkpoints publish atomically with their applied event sequence. Boot discards an
+incomplete checkpoint and replays from the previous complete one. Corrupt records are counted
+and their interval is a coverage gap; no partially reconstructed row is ranked.
 
 ## 2. Cost basis
 
@@ -105,9 +104,11 @@ token from T = 30,000,000, C = 3,501,000,000 removes 116 lamports, retaining 0.7
   for the final candidates and the fee sample; bulk rows use receive time, labelled
   `receive-time proxy`, and `ts_resolved` marks the rows where `getTransaction` replaced it. Cards
   say `7d, execution time where resolved` and never claim execution time for an unresolved row.
-- **Look-back.** Retention 10 days gives 3 days before the window. Look-back buys build `C`; sells
-  before `close − 7d` realise nothing. A pair whose earliest retained record already shows `T > 0`
-  predates the look-back: `basis_incomplete`, excluded. Reachable only for positions > 10 days old.
+- **Look-back.** Ten days of deltas give three days before the window. Restore a complete
+  checkpoint at or before window start, then apply any intervening deltas to build `C` and `T`.
+  Pre-window sells do not contribute window realised profit. Older carried positions remain
+  eligible if the checkpoint preserves their complete basis; age alone does not make it unknown.
+  A missing checkpoint or missing required intervening history sets `basis_incomplete`.
 - **Round trip.** An episode is balance 0 → >0 → 0; episodes in one mint aggregate to one row and
   one breadth unit. A mint counts at ≥ 1 SOL deployed with ≥ 1 episode or an open position at close.
 - **Mark at close** is mint-level: implied price of the last fill before close (curve
@@ -122,7 +123,8 @@ token from T = 30,000,000, C = 3,501,000,000 removes 116 lamports, retaining 0.7
 | open at close, fresh mark | realised + MTM | `open · mark 1.10 SOL · last trade 4 m` |
 | open at close, last trade > 24 h | MTM = 0 | `open · valued 0 (no trade 31 h)` |
 | bought before window, sold inside | realised, carried basis | `carried · opened before 7d window` |
-| older than look-back | excluded | `excluded · basis incomplete` |
+| older than retained deltas, complete checkpoint | carried basis retained | `carried · checkpoint basis` |
+| opening checkpoint/history missing | excluded | `excluded · basis incomplete` |
 | transfer mismatch | excluded | `excluded · transfer 32% of position` |
 
 ## 4. Fees
@@ -136,8 +138,9 @@ and are absent. Two paths:
   asserted priority/tip allowance. Added to buy cost, deducted from proceeds; card
   `fees: estimated 0.0005 SOL/trade`.
 - **Resolve, candidates only.** Top `rank.fee_resolve_top` = 80 (2× watch size, so the cut is not
-  made on the estimate): sample up to 20 recent in-window signatures, `getTransaction`, sum
-  `meta.fee` and prioritisation fee, apply the sample mean to the trade count; card
+  made on the estimate): sample up to 20 recent in-window signatures, `getTransaction`, use
+  `meta.fee` once (including its priority component), add separately decoded tips when present,
+  and apply the sample mean to the trade count; card
   `fees: resolved (20-trade sample)`.
 
 Bound: 80 × 21 = 1,680 calls, concurrency 5 at 300 ms ≈ 100 s, weekly. Failure keeps the estimate,
@@ -224,14 +227,15 @@ the M5 gate is ≥ 50 migrated mints and ≥ 100 PumpSwap events over 24 h, or M
 
 At `close` = Monday 00:00 UTC, misfire grace 1 h, idempotent on `(close_ms, cfg_hash, store_seq)`.
 
-1. **Coverage gate, then freeze `store_seq`** (segments append-only, writer keeps running). Failure
+1. **Coverage gate, then freeze `store_seq`** (deltas append-only, writer keeps running). Failure
    writes `JOB refused` before any store scan is paid for.
-2. **Merge to one row per key**: newest segment first, first record per `(wallet, mint)` wins; a
-   `HashSet<[u8;64]>` at 60k–600k keys is 4–40 MB and rows stream.
-3. **Filter before aggregation**: `last_ts < close − window − lookback`, `excluded`, mint below
-   `rank.mint_volume_floor_sol`, deployment below `rank.min_position_sol`, `basis_incomplete`, one
-   counter each. Only survivors allocate an accumulator (pnl i64, deploy u64, breadth u16, ≤ 64
-   mints, overflow excluded); ~8 MB at 60k wallets, above 200k evict the minimum PnL.
+2. **Reconstruct each wallet/mint chronologically** from the last complete opening checkpoint
+   and ordered deltas (§1). Build opening inventory before the start, reset window realised PnL,
+   then apply only in-window sales to it. Use the last mark strictly before close. No
+   latest-row-wins merge and no summing overlapping cumulative snapshots.
+3. **Filter reconstructed results**: excluded, below mint/deployment floors, incomplete basis,
+   one counter each. Keep bounded accumulators (≤64 mints/wallet, overflow excluded); measure
+   memory in M5. Any pruning that can affect the top set is reported in the job.
 4. **Heavy-hitter prune**: min-heap of 400 keyed `(pnl_lamports, wallet)`, wallet bytes ascending on
    ties — bounded and deterministic.
 5. **Cluster** (§5), then **verify** creator/bundle, balances and fees (§4), which may remove or
@@ -272,49 +276,58 @@ chunks; superseded events drop. Counters `acct_sub_keys`, `acct_sub_chunks`, `ac
 **Classification.** `txType` ∈ {buy, sell}; anything else drops and counts `acct_unknown_side`.
 `traderPublicKey` must be in the set; the mint is unrestricted, which is the point.
 
-**New position versus add.** State per `(wallet, mint)`: `{episode_first_seen_ms, last_ms,
-balance_raw, tokens_peak, buy_count, sell_count, tokens_sold, sol_bought, sol_sold, entry_alerted,
-exit_fired}`. Balance before = `newTokenBalance − tokenAmount`, clamped at 0. A buy is a new
-position iff balance before is 0, state is absent, or state is older than
-`wallet.position_memory_ms` (24 h). Only a new position fires `entered`; an add increments
-`wallet_add_suppressed` and is never announced — one entry per position, not per buy. The touched
-set caps at `wallet.touched_cap` = 100,000 entries at 128 B ≈ 12.8 MB; evict idle > 24 h, then LRU,
-counting `wallet_state_evicted`; an evicted open position re-reads as new, which is accepted for
-entries and forfeits its exit (counted `exit_unpaired`).
+**New position versus add.** State per `(wallet, mint)` owns the same average-cost
+`T, C, R` ledger as §2, plus `episode_id, first_seen, last_seen, tokens_peak, buy_count,
+sell_count, sol_bought, sol_sold, entry_observed, entry_delivered_at, basis_complete,
+transfer_ambiguous, exit_fired`. A buy opens a complete episode only when a trustworthy balance
+before that buy is zero, or a recorded prior zero establishes it. For a buy,
+`balance_before = newTokenBalance − tokenAmount`; a negative or inconsistent result is
+unknown, never clamped into evidence of a new position. State absent with a nonzero prior balance
+may emit a labelled first-observed entry, but is unpaired for exits and has no known cost basis.
 
-**Exits.** A position fires **one** `EXITED` card when
+An add updates `T, C` and peak, counts `wallet_add_suppressed`, and posts no entry. A known
+zero closes the episode; a subsequent zero-to-positive buy creates a new episode id. Idle eviction
+after 24 h and LRU beyond `wallet.touched_cap` (100,000) discard the basis and forfeit any paired
+exit. RAM sizing is measured in M5; the previous 128-byte estimate is withdrawn.
+
+**Exits.** The trigger describes observed inventory depletion, not total turnover:
 
 ```
-sold_share   = tokens_sold / tokens_peak              ≥ wallet.exit_share_bp / 10_000   (0.90)
-proceeds     = sol_sold                               ≥ wallet.min_exit_sol             (1.0 SOL)
-exit_fired   = false
+sold_share = (tokens_peak − T) / tokens_peak >= wallet.exit_share_bp / 10_000
+sol_sold >= wallet.min_exit_sol
+basis_complete && !transfer_ambiguous && !exit_fired
 ```
 
-`tokens_sold = tokens_peak − balance_raw` from `newTokenBalance` where the field is trustworthy
-(C6), else the sum of sell `tokenAmount` with the basis labelled `sell sizes`. `tokens_peak` is the
-highest balance observed during the episode; a buy does not reset the denominator. The card shows
-`sold_share`, `position closed` when the remainder is ≤ `wallet.exit_dust_bp` (0.05) of peak and the
-exact remainder otherwise, realised SOL, hold time, entry and exit price, and the wallet rank.
+A positive peak is required. `T` follows all observed buys and sells; peak is the maximum
+inventory in the episode. Repeated sales followed by buys do not accumulate a false 90% exit.
+The balance-derived and trade-size-derived paths reconcile against the same ledger; a mismatch
+makes the episode ambiguous rather than changing the meaning of the metric. `closed` means
+`T <= peak × wallet.exit_dust_bp / 10_000`; the exact remainder is always shown.
 
-- **Realised PnL.** `realised = sol_sold − sol_bought × (tokens_sold / tokens_peak)`, in integer
-  lamports, with `rank.fee_est_lamports_per_trade` applied to both sides and labelled
-  `fees estimated`. If `sol_bought` is zero or the state did not observe the entry, the card says
-  `cost basis unknown` and omits PnL. It never prints a number over an unobserved basis.
-- **Pairing.** `wallet.exit_require_entry` (PRIOR true) requires the episode to have been seen by
-  live matching. A pre-boot position, an evicted state, or a mint first seen mid-position is
-  `exit_unpaired`: no card. Pairing bounds exits by observed entries and keeps the card honest;
-  disabling it alerts any sell-down with the line `entry not observed`.
-- **Transfers are not exits.** A balance fall with no matching sell sets `transfer_out`, suppresses
-  the exit, and counts `exit_transfer_ambiguous`. A later sell may still fire if the remaining
-  balance reaches the share; the card then states the transfer.
-- **No re-entry confusion.** A new episode after the position returns to zero is a new
-  `episode_first_seen_ms` and can fire another exit; one position, one exit.
-- **Restart.** Position state is RAM-only. After a restart, pre-restart positions are unpaired and
-  cannot exit; count `exit_cold_on_restart` and let the boot line carry it. A restart is not a
-  promise that a live position is still watched.
+- **Realised PnL.** Apply §2 on every buy and sell, including estimated fees: buy fees join
+  remaining cost, and each sell removes its proportional current cost and its own fee. The card
+  shows accumulated realised `R`, never `sol_sold − sol_bought × depletion`. Adds after
+  partial sells are ordinary ledger events, not a new averaging shortcut.
+- **Pairing.** `wallet.exit_require_entry=true` requires a complete episode whose opening was
+  observed; it does not claim the entry was delivered. The footer separately says
+  `entry delivered at <time>` or `entry observed; alert not delivered`, based on the
+  sender's successful POST callback. Unknown delivery is not successful delivery. With pairing off,
+  an unknown-basis sell may produce `SELL OBSERVED — entry not observed`, with quantity and
+  proceeds only; it must not claim percent exited, closed status or realised PnL.
+- **Transfers.** Reconcile the expected post-trade inventory with any trustworthy reported balance.
+  An unexplained change in either direction sets `transfer_ambiguous`, suppresses the percentage
+  exit and omits PnL for the rest of that episode. Transferring 60% and selling 30% does not mean
+  90% sold. A later sell cannot clear the flag; only a verified zero and a new fully observed
+  episode restore eligibility. Transfers that leave and return between observations remain a
+  stated blind spot.
+- **Delivery and restart.** `exit_fired` latches at candidate creation, so a suppressed or expired
+  candidate is counted and not recreated on each sell. Position state is RAM-only; after restart,
+  prior positions are unpaired until a new complete opening is seen. Boot reports
+  `position_state=cold`; it cannot report the exact number of lost positions without a persisted
+  checkpoint.
 
-**Dedup and pacing.** Entry key `(wallet, mint, entry, episode_first_seen)`; exit key
-`(wallet, mint, exit, episode_first_seen)`; `deliver.wallets.dedup_ttl_ms` = 86,400,000 (24 h) in the
+**Dedup and pacing.** Entry key `(wallet, mint, entry, episode_id)`; exit key
+`(wallet, mint, exit, episode_id)`; `deliver.wallets.dedup_ttl_ms` = 86,400,000 (24 h) in the
 delivery set. Entry cooldown per `(wallet, mint)` `deliver.wallets.cooldown_ms` = 10,800,000 (3 h;
 band 1–4 h); the cooldown **does not apply to exits**, so an entry and its exit inside three hours
 are both delivered. Order: classify → entry or exit → gates (`wallet.min_buy_sol` 0.25 for entries,
@@ -329,7 +342,7 @@ counted, never silent.
 | buy size SOL, entry price, mint age, venue; health footer when not normal | live event, registry, `delivery.md` |
 | `EXITED`, sold share, closed/remainder, hold time, entry and exit price | live event, position state |
 | realised SOL, basis (`balance` \| `sell sizes` \| `unknown`), fees mode | position state, `rank.fee_est_lamports_per_trade` |
-| pairing line (`entry alerted 42 min ago` \| `entry not observed`), transfer note | position state, delivery |
+| pairing line (`entry delivered at <time>` \| `entry observed; alert not delivered`), transfer note | position state, successful delivery callback |
 
 **Reachability.** The 40 wallets are a discovery set, not a per-wallet delivery promise. At 3
 entries/wallet/day, 40 wallets yield ~120 entry candidates/day; exits on observed positions can
@@ -337,6 +350,11 @@ add a similar number, so the combined ~240 candidates/day against the 20/day cap
 92%, counted `wallet_budget_suppressed`. Exits are ranked before entries and within each kind by
 `(wallet PnL desc, size desc)` before the budget. The exit sub-cap means at most 3 of any hour's 6
 wallet posts are exits; entries are not promised the remainder either.
+
+An episode id is a deterministic 128-bit hash of wallet, mint and normalized opening trade identity, not a
+source's receive timestamp. Delivery dedup uses that id across source changes. Missing opening
+identity makes the episode unpaired. Live matching and the weekly job call the same position
+accounting functions; fixtures cover sell→add→sell, transfers and carried inventory.
 
 ## 10. Configuration
 
@@ -357,9 +375,9 @@ wallet posts are exits; entries are not promised the remainder either.
 | `rank.pending_ttl_ms`, `rank.job_cron`, `rank.job_misfire_grace_ms` | ms / cron UTC / ms | 3,600,000 / `0 0 * * 1` / 3,600,000 | sub-threshold buys accumulate; weekly; late, not skipped |
 | `deliver.wallets.cooldown_ms`, `wallet.min_buy_sol` | ms / SOL | 10,800,000 / 0.25 | delivery-owned; 3 h in band; dust is not information |
 | `deliver.wallets.dedup_ttl_ms` | ms | 86,400,000 | delivery-owned; 24 h dedup window |
-| `wallet.touched_cap`, `wallet.position_memory_ms` | entries / ms | 100,000 / 86,400,000 | ~12.8 MB at 128 B; 24 h idle is re-entry |
+| `wallet.touched_cap`, `wallet.position_memory_ms` | entries / ms | 100,000 / 86,400,000 | measure ledger state size; idle eviction forfeits basis until a new verified opening |
 | `wallet.chunk_keys`, `wallet.add_alert` | keys / bool | 100 / false | vendor limit unverified; one entry per position |
-| `wallet.exit_share_bp`, `wallet.exit_dust_bp` | bp | 9,000 / 500 | 90% of peak sold is an exit; 5% remaining is closed |
+| `wallet.exit_share_bp`, `wallet.exit_dust_bp` | bp | 9,000 / 500 | 90% net depletion with complete sell-only lineage; ≤5% remaining is closed |
 | `wallet.min_exit_sol`, `wallet.exit_require_entry` | SOL / bool | 1.0 / true | dust proceeds are not information; pairing keeps the basis honest |
 | `deliver.wallets.exit_hourly` | posts/h | 3 | an exit storm cannot crowd out entries; shares the 6/h wallet token bucket |
 
@@ -381,7 +399,7 @@ wallet posts are exits; entries are not promised the remainder either.
 
 | # | Test | Pass condition |
 |---|---|---|
-| 1 | 10,000 rows, 2 segments, restart; then `kill -9` mid-flush | every field equal; loss ≤ 30 s covered by a gap, never 10000 bp |
+| 1 | 10,000 deltas and 2 opening checkpoints, restart; then `kill -9` mid-flush | every field equal; loss ≤ 30 s covered by a gap, never 10000 bp |
 | 2 | Golden cost basis §2 | realised 1,898,000,000 exactly; partial sell removes 116 |
 | 3 | Determinism, 10 runs with shuffled RPC cache | identical sha256 each run |
 | 4 | Boundary: trade at `close−1`, at `close`, ±300 s | first included, second excluded, band reported |
@@ -398,12 +416,16 @@ wallet posts are exits; entries are not promised the remainder either.
 | 15 | Buy, then sells at 50%, 89.9%, 90.0%, 100% of peak | 0 / 0 / 1 / 0 cards; `EXITED` once, `exit_fired` latched |
 | 16 | 90% sold with 0.9 SOL proceeds, then 1.0 SOL | no card, then card; `wallet.min_exit_sol` exact at the boundary |
 | 17 | Entry posts, exit 30 min later | 2 posts; entry cooldown does not suppress the exit |
-| 18 | Transfer out 60%, then sell 30% of peak | no exit on the transfer, `exit_transfer_ambiguous = 1`; the sell reaches 90% and the card states the transfer |
-| 19 | Position opened before boot; sell 100% | `exit_unpaired = 1`, 0 posts; with pairing off, 1 post, `entry not observed`, no PnL |
+| 18 | Transfer out 60%, then sell 30% of peak | `transfer_ambiguous`, no percentage exit or PnL on either event; only a new complete episode restores eligibility |
+| 19 | Position opened before boot; sell unknown prior inventory | Pairing on: suppressed; pairing off: SELL OBSERVED with quantity/proceeds only, no percent/closed/PnL |
 | 20 | 10 exits in one hour with entry candidates queued | 3 exits posted, 7 `wallet_exit_suppressed{cap}`; entries still use the remaining wallet tokens |
-| 21 | Buy 30M tokens for 3.5 SOL, sell 27M for 4.0 SOL | realised `4.0 − 3.5 × 0.9 − 2 fees` = 0.85 SOL minus fees; sold share 90%; closed? remainder 10% → no |
+| 21 | Buy 30M tokens for 3.5 SOL, sell 27M for 4.0 SOL, fee 500,000 lamports/trade | `R = 849,050,000` lamports after proportional buy-fee basis and sell fee; 90% depleted, 10% remains |
 | 22 | Replay a recorded wallet day | Identical exit cards, suppressions and order; `report_sha256` stable |
-| 23 | Restart with three open positions | All three `exit_unpaired`; `exit_cold_on_restart = 3`; boot line carries it, no card |
+| 23 | Restart with open positions and no position checkpoint | Boot says position state cold; next activity lacks basis and cannot produce paired percentage exits; no invented count of lost positions |
+| 24 | Buy 100 for 10 SOL, sell 50 for 10, buy 50 for 20, sell 90 for 18; fees zero | 10 tokens remain, depletion 90%, realised 0.5 SOL; live and ranking ledger agree |
+| 25 | Realise 5 SOL before window, 1 SOL inside, with complete opening checkpoint | In-window realised = 1 SOL, never 6 SOL; carried inventory retains its basis |
+| 26 | Trade exactly at start / at close; then lose needed opening history | Start included, close excluded; missing basis refuses the affected row and reports incomplete coverage |
+| 27 | Entry observed but cap-dropped; eligible exit later | Footer says entry observed, alert not delivered; successful entry callback is the only delivered-state setter |
 
 ## 13. Open questions and recommendations
 
@@ -415,7 +437,7 @@ wallet posts are exits; entries are not promised the remainder either.
 | Inbound transfers | exclude at reconciliation, as written | inbound tokens on > 5% of candidates |
 | Cluster PnL as a sum | keep the sum, cap members at 20, show the count | one cluster takes > 20% of the top 40 |
 | Fee constant 500,000 | use until measured | first 100 resolved medians outside [250k, 1,000k] |
-| Retention 10 days | keep | > 259,000 rows/day, which trips 512 MiB inside 10 days |
+| Retention 10 days plus required checkpoint | measure event/checkpoint bytes before M2a; refuse incomplete windows at cap | needed history cannot fit 512 MiB |
 | Raydium gap | the 24 h PumpSwap gate is the only defence | < 100 PumpSwap events in 24 h |
 | Cooldown 3 h / weekly rebuild | keep both: 3 h is inside the band; weekly matches "the previous week", while daily would be yesterday's winners | wanted repeats inside 3 h, or noise above budget |
 | Exit threshold 90% of peak, dust 5% | keep; it catches the whale that leaves dust and never sells it, while a 50% trim is not an exit | more than 40% of exits fire with a 4–5% remainder, which reads as a trim |
@@ -423,3 +445,4 @@ wallet posts are exits; entries are not promised the remainder either.
 | Exit sub-cap 3/h | keep; protects entries from an exit storm | exits fill the cap every hour while entries starve |
 | Exits share the 20/day cap | keep; no separate promise, no separate channel | exits consume most of the daily cap and entry delivery collapses |
 | Transfers out | suppress and count, never alert as an exit; state it if a later sale fires | transfers exceed 10% of positions that leave |
+

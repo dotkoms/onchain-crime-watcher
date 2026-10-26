@@ -21,7 +21,7 @@ Telegram handles.
 
 | Repo | Stars | Lang | License | Why it matters |
 |---|---|---|---|---|
-| `rpcpool/yellowstone-grpc` | 1015 | Rust | AGPL-3.0 | The Geyser gRPC service itself. Use it as a server, never copy code into our crate |
+| `rpcpool/yellowstone-grpc` | 1015 | Rust | Server/default AGPL-3.0-only; clients/protos Apache-2.0 | Component-level licenses in upstream LICENSING.md; standard client eligible after pinned-tree review |
 | `Shyft-to/solana-defi` | 354 | Rust/TS | README claims MIT; API detects none | gRPC parsing examples for Pump, Raydium, Orca, Meteora. Strong reference for per-program decoders |
 | `0xfnzero/solana-streamer` | 187 | Rust | MIT | Rust facade over a parser SDK: Pump/PumpSwap/Raydium/Meteora/Orca, zero-copy, micro-batching, backpressure, benchmark. Closest match to our Geyser adapter plan |
 | `0xfnzero/pumpfun-sdk` | 83 | Rust | MIT | Rust SDK with pump.fun log and Yellowstone subscriptions; `PumpfunEvent` enum |
@@ -110,12 +110,16 @@ upstream can be leaned on for rate-limit or edit semantics.
 |---|---|---|
 | MIT | solana-streamer, pumpfun-sdk, geyserbench, Spectre, cluster backend, PnL tracker, arbitrage bot | Direct use with attribution |
 | Apache-2.0 | chainstacklabs/pumpfun-bonkfun-bot | Direct use with notice |
-| AGPL-3.0 | yellowstone-grpc | Server use only; do not copy into our binary |
+| AGPL-3.0-only | Yellowstone server/default | Do not copy server implementation into our binary |
+| Apache-2.0 | Yellowstone clients/protos/examples | Eligible with attribution and pinned transitive-license review |
 | None detected | pump-public-docs, Shyft, solana_meme, bundler, copy-trading, DexScreener wrappers | Concepts only; verify the LICENSE file before any reuse |
 
 **The M6 secondary client is a license gate.** Failover (`../docs/failover.md`) is the first
 feature that needs a dependency we have not shipped: a second provider's client. `yellowstone-grpc`
-is AGPL-3.0 and must not be linked into this MIT binary. M6 ships only with a permissively licensed
+has an AGPL server/default license but Apache-2.0 client/proto directories, verified against
+[upstream LICENSING.md](https://github.com/rpcpool/yellowstone-grpc/blob/master/LICENSING.md)
+on 2026-10-25. The standard Rust client is eligible; verify exact versions and transitive licenses. M6 ships only with a permissively licensed
 provider SDK or a client generated from permissively licensed proto definitions; the chosen
 client, version and license read are recorded here at build time, and CI denies copyleft licenses
 in the binary's dependency tree. No code was cloned for any reference in this file.
+

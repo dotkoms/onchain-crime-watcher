@@ -1,6 +1,6 @@
 # Backtesting — capture and replay
 
-Status: v1 design, 2026-10-25. Contract: [`../SCOPE.md`](../SCOPE.md) revision 5 (§3, §9, R10).
+Status: v1 design, 2026-10-25. Contract: [`../SCOPE.md`](../SCOPE.md) revision 6 (§3, §9, R10).
 This file reverses revision 4's "no backtest harness" and defines what replaces it. Siblings:
 `feed.md`, `volume.md`, `ranking.md`, `bundle.md`, `delivery.md`, `operations.md`, `failover.md`.
 
@@ -28,27 +28,34 @@ It is a deterministic re-run of the live decision path over a recorded arrival h
 
 ## 1. What is recorded
 
-Raw WebSocket frame bytes, exactly as received, **before decode and before dedup**, plus the
-receive time and the session identity. Decode happens at replay with the same adapter, so a
-decoder change is testable against old bytes and a schema drift stays visible.
+Capture raw frames pre-decode and pre-dedup, and record every external input that can change a
+decision. Revision 6 distinguishes a byte/decoder fixture from a complete decision replay.
 
 | Captured | Why |
 |---|---|
-| raw frame bytes | Decode, field-presence and schema tests; no lossy re-encode |
-| `recv_mono_ns` | The live bucketing input (R1). Replay must reproduce it exactly |
-| `recv_wall_ns` | Human time for reports; never a routing input |
-| `seq` (per source, monotonic) | Arrival order survives compression and segment rotation |
-| `generation`, `sub_gen` | Replay reproduces generation drops and superseded subscriptions |
-| `source` (`pumpportal` \| `secondary`) | Two-source replay from M6; one stream today |
-| session lifecycle records | Open/close/ban/probe/reconnect, so replay has a health timeline, not just frames |
-| config hash | Provenance. The config itself is not stored, and secrets never are |
+| Raw frame bytes, source, per-source seq, session generation and subscription generation | Exercise decode/dedup against the original arrival history |
+| Boot id, monotonic offset, receive wall time, logical application sequence | Durations survive process restarts; cross-source/control ordering is explicit |
+| Session lifecycle, subscription commands/results, watchdog/probe observations, timer ticks, UTC-day rollovers | Reproduce health, gate, cap and timer decisions |
+| Sanitized output-affecting config snapshot at boot and each accepted reload | A hash cannot reconstruct parameter values; secrets and credential URLs are excluded |
+| Initial registry/rings/cohorts, dedup/cooldown/budget state, authority state, watch set and live position state, or a complete cold-boot prefix | An arbitrary date slice does not start with empty live state |
+| RPC/HTTP request identity, response or error, and application sequence/time | Reproduce heals, funding, fees, balances, CTO lists, prices and SOL/USD inputs without live network access |
+| Delivery result classes and entry-success callbacks, if reproducing live pairing | Observed opening and delivered entry are different facts |
+| M6 authority decisions and boundary records | Audit switches and compare with independently replayed controller decisions |
 
-Not captured: decoded events, alert candidates, message ids, dedup state, config values, secrets.
-A replay re-derives all of it.
+Store snapshots as versioned, checksummed side artifacts referenced by the manifest. A bounded
+recorder may miss an input; that interval becomes `unrecorded`, and a complete-decision report is
+refused. A decoder-only fixture may still run with its narrower claim. RPC responses and captured
+metadata remain untrusted, size-bounded inputs. Never store secrets, webhook tokens, authorization
+headers or credential-bearing endpoint URLs.
 
-**Why pre-dedup.** A recording of accepted events would bake in the live dedup window and could
-never test it. Replaying raw frames exercises dedup, generations, late trades and the gate in the
-same order they occurred.
+Capture does not persist live message ids for recovery. A replay uses logical delivery-result
+events, not Discord ids. The production alert path never reads capture files.
+
+**Replay scope.** Detector/delivery threshold comparisons hold the observed subscription universe
+fixed. Changing gate selection, watch-set membership or provider filters can require trades that
+were never recorded. Such a run is labelled `unsupported_counterfactual`, cannot justify fitted
+defaults and never treats absent data as zero. A report over existing arrivals is not an
+evaluation of the market coverage a different gate would have bought.
 
 ## 2. Recorder
 
@@ -59,31 +66,30 @@ The frame path is already `session → Frame` on a bounded channel. The pipeline
 written marker). A cloned `Bytes` is a refcount, so the tap costs no copy on the hot path; the
 writer owns compression and disk.
 
-The session assigns `seq` in receive order. Replay orders by `(segment, seq)` and never by
-`recv_wall_ns`: wall clocks step, and a replay that sorts by wall time is not the live path.
+The session assigns per-source `seq` in receive order. Each effective state input also carries
+a process-wide logical application sequence; ticks, control inputs and source inputs participate
+in that ordering. Live application of a switch is a barrier, not a race between pipelines.
+Replay follows boot order and application sequence, never a sort by wall time. Durations use
+boot-local monotonic offsets; captured UTC-day rollover events drive daily budget resets.
 
 ### 2.2 Files
 
 ```
 capture/<source>/<YYYY-MM-DD>/seg-<HH>.ocwcap     zstd-framed records
-capture/<source>/<YYYY-MM-DD>/seg-<HH>.idx        8 B per record: seq, offset, len
+capture/<source>/<YYYY-MM-DD>/seg-<HH>.idx        rebuildable sequence/offset index
 capture/<source>/<YYYY-MM-DD>/manifest.json      counts, coverage, hashes, config
 ```
 
-Segment header (32 B): magic `OCWC`, version u8, source u8, flags u16, day_start_ms i64,
-first_seq u64, crc32c of the header. Record:
+Segment headers carry magic `OCWC`, schema version, source and boot identity. Records are
+length-bounded and checksummed, with per-source receive sequence, logical application sequence,
+boot-local monotonic offset, wall timestamp, generation, subscription generation, kind and
+payload. Indexes are rebuildable. M1 pins the actual binary encoding and byte sizes with
+round-trip fixtures; this plan does not prescribe conflicting hand-counted offsets.
 
-```text
-[len u32][crc32c u32][seq u64][recv_mono_ns u64][recv_wall_ns i64]
-[generation u32][sub_gen u32][kind u8][payload len bytes]
-```
-
-`kind` is `Frame`, `SessionOpen`, `SessionClose`, `Ban`, `Probe`, `CaptureDrop`. One transaction
-can hold several trades; they are separate frames or separate records and keep their order.
-
-Manifest, fsynced at segment close and every 60 s (PRIOR): `source`, `day`, `seq` range, frame
-count, byte count, sha256 of the segment, config hash, feed mode, and a list of
-`{from_seq, to_seq, reason}` **capture gaps**.
+The manifest references segment hashes, sanitized configuration versions, initial checkpoint
+hashes, UTC-day rollovers, supported replay modes and missing-input intervals. Seal and sync at
+segment close; sync progress every 60 s (PRIOR). A missing snapshot or response is visible evidence
+loss, never an implicit default.
 
 ### 2.3 Loss, crash, retention, disk
 
@@ -98,7 +104,8 @@ count, byte count, sha256 of the segment, config hash, feed mode, and a list of
 
 **Sizing.** At the 0.5 SOL/day budget the stream is ~500,000 messages/day. A trade frame is
 ~350 B raw (PRIOR: the observed payload in `sources.md` §3.1, base58 addresses dominate), so
-~175 MB/day raw, ~60–90 MB/day at zstd-3 (PRIOR: 2–3× on base58-heavy JSON). Fourteen days is
+~175 MB/day raw, ~60–90 MB/day for trade frames alone at zstd-3 (PRIOR: 2–3× on base58-heavy JSON).
+Config, checkpoints, free streams and external-response tapes add measured overhead. Trade-only fourteen days is
 ~1.2 GiB; the cap is 2 GiB, which leaves room for a busier measured rate before retention
 shortens. If M1 measures 1,500 msg/s sustained instead of ~5.8, the cap binds and capture
 prunes, never the alert path.
@@ -111,22 +118,33 @@ untrusted input at replay — the same decoder and fuzz corpus apply.
 
 ```
 ocw replay --from 2026-11-01 --to 2026-11-07 --config <toml> --out <dir>
-           [--source pumpportal|secondary] [--train 5d] [--simulate-delivery]
+           [--mode decoder|decisions|controller] [--source pumpportal|secondary]
+           [--train 5d] [--simulate-delivery]
 ```
 
-The harness links the production crates and calls the same adapter decode, dedup, registry,
+`controller` mode requires both source tapes plus control order; it rejects `--source` because
+arbitration cannot be checked from one feed. `decisions` mode requires the complete input/state
+manifest. `decoder` mode explicitly makes no full-decision claim.
+
+The harness links the production library and calls the same adapter decode, dedup, registry,
 gate, detectors and delivery **admission** code. It does not reimplement them; a replay that
 shares no code with the live path proves nothing about the live path. It writes only under
 `--out`, refuses to open the live `OCW_DATA_DIR`, and never emits an alert.
 
 ### 3.1 Virtual clock
 
-Every time read in the pipeline goes behind a `Clock` trait. Live uses `Instant`; replay uses
-`VirtualClock`, anchored at the first record and advanced to each record's `recv_mono`. Bucket
-closes, cooldowns, budget refills, hold expiry and watchdog thresholds all read the same clock.
-The 100 ms ticker becomes a virtual tick driven by the record timeline, not a wall timer.
-Randomised jitter in the supervisor is disabled or seeded from a fixed seed; nothing in decode
-or detection uses RNG.
+Every duration read uses a `Clock` boundary. Restore the initial checkpoint or replay the full
+cold-boot prefix, then apply recorded inputs in logical application order. The virtual scheduler
+executes **all** due bucket closes, hold expiries, budget refills and watchdog ticks, including
+silent intervals and the final requested report boundary. It does not wait for another trade
+before advancing a timer. Recorded boot boundaries reset monotonic epochs explicitly; captured
+UTC-day rollovers control daily counters.
+
+External clients are replaced by offline response tapes matched on request identity and
+application order. A missing response, incompatible checkpoint or unknown config version refuses
+complete-decision mode. No request falls through to a live endpoint. Randomized supervisor
+jitter is fixed-seed; the seed, code revision, schema versions and initial-state hashes are
+report inputs.
 
 ### 3.2 Determinism
 
@@ -135,8 +153,10 @@ A report is only evidence if it is reproducible. Rules:
 - Integer accumulation in the trade path, as in `volume.md`; floats only at the same points the
   live code uses them.
 - No `HashMap` iteration in ordering decisions; sort keys are total and stated.
-- Segment order, seq order, and a fixed seed for anything random.
-- The output carries `config_hash`, `source`, the segment sha256 list and a `report_sha256`.
+- Boot order and logical application order, including cross-source/control inputs, and a fixed seed for anything random.
+- The output carries code/schema versions, sanitized config history, checkpoint and response-tape
+  hashes, source set, segment hashes and a `report_sha256`. The hash excludes wall-clock run time
+  and the hash field itself.
   Ten runs of the same input produce the same hash; a mismatch is a bug in the harness, not
   variance.
 
@@ -155,10 +175,10 @@ retries, and writes no message ids.
 
 ### 3.4 Cost
 
-Decode + detect is 5–15 µs per trade typical (`SCOPE.md` §4). One 500,000-frame day is ~5–8 s of
-CPU plus zstd decompression; a seven-day report is under a minute. Replay is an offline binary
-path, not a production task; it shares the frame channel capacities so RSS stays bounded by the
-same caps as live.
+Replay throughput is measured in M2a and M2b with the fixture size, external-input volume,
+storage format and code revision stated. The previous under-one-minute estimate omitted state
+restoration and external inputs and is withdrawn. Replay is an offline binary path; it reads
+bounded streams and never opens the production data directory.
 
 ## 4. What a replay can and cannot answer
 
@@ -272,15 +292,21 @@ report over that window must state the hole.
 | B1 | 24 h capture with a 10-minute forced disconnect | Frames round-trip byte-identically; manifest gap matches the disconnect within 1 s; no record reordered by wall-clock step |
 | B2 | Kill -9 mid-segment, restart | Torn tail dropped and counted; `.idx` rebuilt; every earlier record decodes |
 | B3 | Capture queue saturated for 60 s | `capture_dropped_frames` exact, the marker written, the feed's `frames_dropped` unchanged |
-| B4 | Replay a 1 h fixture three times | `report_sha256` identical; candidate counts identical; no wall-clock or RNG dependency |
+| B4 | Replay a 1 h fixture ten times | `report_sha256` identical; candidate counts identical; no wall-clock or RNG dependency |
 | B5 | Replay the same fixture under a ±5 s wall-clock step | Identical output; bucket assignment unchanged |
 | B6 | Replay a day that overlaps a capture gap | Report marks `unrecorded` over the window; no rate computed over it |
 | B7 | Delivery simulation with a full budget | Same admissions, drops and order as `delivery.md` §3; no network, no ids |
 | B8 | Fitted key with no `tested_on` | Boot fails naming the key; with a hash that does not exist, boot fails naming the hash |
 | B9 | Sweep 25 configs | Run refused at `backtest.max_sweeps`; the report lists every run, not only the best |
 | B10 | Forward mark over an alert whose mint never trades again | Censored and counted; no zero return invented |
-| B11 | Two-source capture (M6) | Both streams replay independently; `--source` selects one; a combined run is refused |
+| B11 | Two-source capture (M6) | `--source` runs a single-source detector audit; controller mode replays both isolated pipelines plus control inputs in application order, reproducing FO9 without merging trade histories |
 | B12 | Capture byte cap reached | Whole oldest day pruned first, then capture stops; neither the feed nor the rank store writes fail |
+
+| B13 | Slice starts with open positions and warm rings | Checkpoint/prefix restores the same decisions; missing state refuses complete-decision mode |
+| B14 | Captured RPC response, reload, UTC midnight and process restart | Offline run reproduces results; missing response refuses; no live network request |
+| B15 | Ten-minute silence then report ends | All due ticks and expiries run before report close |
+| B16 | Sweep a gate or watch-set change needing uncaptured trades | `unsupported_counterfactual`; no fitted default or invented zero |
+| B17 | Two boots with overlapping monotonic offsets and a wall-clock step | Boot/application order is preserved; duration and daily-reset semantics match capture |
 
 ## 10. Open questions
 
@@ -292,3 +318,4 @@ report over that window must state the hole.
 | 4 | Forward marks | Keep as a censored outcome proxy, never as precision | A user reads it as a hit rate; rename the report field |
 | 5 | Two non-overlapping windows before a default changes | Keep; it is the only defence against one lucky week | A measured regime where two weeks cannot be collected before a launch |
 | 6 | Minimum seven days | Keep for M2b; one day may be enough for a decoder test, never for a threshold | A week where the recorded rate does not match the next week within tolerance |
+

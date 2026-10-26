@@ -110,12 +110,43 @@ because the standby is unhealthy.
 | `gate.max_subs` total | 20 | No new subscription |
 | retained slots | `max_subs − launch_slots` = 16 | Candidate needs score `>= min_retained × gate.evict_margin`; else refused |
 | `gate.launch_slots` | 4 | Wait 2 s (PRIOR) for a slot, then skip, count `launch_skipped`, and mark the bundle `launch window missed` |
-| `gate.feed_sol_per_day` | 0.5 SOL/day PRIOR | Total PumpPortal trade spend per UTC day, launch windows included, no exemption. At 0.5 it implies ~500,000 messages/day ≈ 5.8 msg/s sustained, so spend binds before the 20-slot cap. When hit: refuse new subscriptions and skip launch windows, count `gate.budget_hit`, health red |
+| `gate.feed_sol_per_day` | 0.5 SOL/day PRIOR | Total PumpPortal trade spend per UTC day, launch windows included, no exemption. At 0.5 it implies ~500,000 messages/day ≈ 5.8 msg/s sustained, so spend binds before the 20-slot cap. On local exhaustion: stop all paid mint and account subscriptions, refuse new paid commands, and recycle to a free-stream-only socket if unsubscribe cannot be established; see the durable spend rule below |
 
 CTO-listed mints bypass admission, evicting the lowest-score non-CTO mint; if all retained are CTO,
 the new CTO is refused and counted, and its card says coverage was capped. Every refusal is counted.
 
-### 3.3 Ledger, reconciliation, unsubscribe
+### 3.3 Daily spend enforcement
+
+`gate.feed_sol_per_day` is a local allowance, not a provider-enforced billing cap. All received
+billable messages debit it before normalization and dedup; duplicates and invalid payloads are not free.
+Unknown billing classification is charged conservatively and reconciled with the provider.
+Mint and account subscriptions share the allowance. Never multiply a deduplicated trade count by
+price and call that the bill.
+
+Persist a per-UTC-day spend ledger separately from prunable capture/rank files. Reserve message
+allowances durably before enabling paid streams, in blocks of `gate.spend_reservation_messages`
+(PRIOR 1,000). On crash, unused reserved messages remain charged locally. If the ledger is
+missing after prior use, corrupt or unwritable, paid streams stay off pending operator
+reconciliation; free create/migration streams may continue. A restart, reload or backward clock
+step never resets the day's allowance.
+
+Stop paid streams at allowance minus `gate.spend_stop_margin_messages` (PRIOR 10,000, 0.01 SOL
+at the current published price). Cancel paid desired entries, unsubscribe **all** live mint and
+account keys, block their resubscription and skip launch windows. If the provider has no usable
+unsubscribe acknowledgement, close that socket immediately and reconnect with free streams only.
+Account watchers cannot bypass the stop. Paid subscriptions may resume on a new UTC day only
+after the new allowance is durably reserved and provider billing/credit health is acceptable.
+Budget-induced blind intervals go into coverage; no wallet/volume alert implies uninterrupted
+observation through them.
+
+Frames already accepted upstream can still be billed during teardown. M1 measures that exposure
+and confirms the margin under saturation and forced reconnects; without a provider contractual
+bound there is **no guaranteed exact 0.5 SOL charge ceiling**. Health prints local reserved/received
+spend, provider-reconciled spend when available, stop margin, overshoot and ledger state.
+A strict monetary ceiling requires a verified provider-side limit or a separately bounded funded
+API wallet; no automatic top-up is part of this bot.
+
+### 3.4 Ledger, reconciliation, unsubscribe
 
 One entry per mint: `{mint, curve, sub, kind, state, sent_at, last_msg, msgs, unsub_attempts}`,
 where `kind` is `Launch{deadline}|Retained{retain_at, ttl_at}|None` and `state` is
@@ -331,6 +362,12 @@ are in `backtest.md` §7. They are not repeated here.
 `sol_spent_today = msgs_charged_today / 10000 × 0.01`. Both are displayed; neither is a bill.
 `gate.feed_sol_per_day` is validated in 0–200 SOL/day; values outside fail boot.
 
+**Spend configuration.** `gate.spend_reservation_messages=1000` and
+`gate.spend_stop_margin_messages=10000` are positive integers; the stop margin must be smaller
+than the daily message allowance. `gate.spend_ledger_path=data/feed-spend.json` is boot-only,
+0600, atomically replaced and synced, never pruned. Prices and billing units are dated provider
+facts, not hidden constants.
+
 ## 9. `/health`
 
 The boot line (`operations.md`) reads `feed.mode`, `feed.generation`, `feed.sockets_open` (per
@@ -376,6 +413,12 @@ Test counts, durations and tolerances are acceptance priors; runtime defaults ar
 | F11 | Three <5 s sessions enter Banned; zero sockets for 3600 s on a virtual clock; one retry after expiry; failure re-bans |
 | F12 | 1M mutated frames: no panic, RSS bounded, decode-error count exact, no byte retried; cost accounting matches charges within 0.1% |
 
+**Additional M1 spend acceptance:** active mint and account streams are stopped at the local
+threshold; zero paid keys are resubscribed until reset. Kill during reservation, restart twice,
+and step the wall clock backward: allowance never increases. Corrupt the ledger: free streams
+run but paid streams remain off. Saturate teardown: measure all billable messages and report
+actual provider overshoot; never claim the margin proves an upstream hard cap.
+
 ## 11. Open questions
 
 | # | Question | Recommendation |
@@ -388,4 +431,5 @@ Test counts, durations and tolerances are acceptance priors; runtime defaults ar
 | 6 | Is block heal worth its cost beyond a minute? | No. Cap at 150 slots and declare create coverage. Geyser is the real answer (`sources.md`). |
 | 7 | Do M5 account subscriptions consume gate caps? | Separate `gate.max_account_keys` (PRIOR 40) plus the same `gate.feed_sol_per_day` cap; an account trade alone does not retain a mint. |
 | 8 | Two identical trades in one transaction share every key field. | Accept the single loss; add `tx_index` when available. A frame ordinal would defeat replay dedup. |
-| 9 | Which secondary provider, and can its client ship under MIT? | A Geyser-protocol provider with a permissive client or a client generated from permissive proto definitions. `yellowstone-grpc` is AGPL-3.0 and must not be linked; M6 gates on a clean dependency tree (`failover.md` §14). |
+| 9 | Which secondary provider, and can its client ship under MIT? | Yellowstone client/proto directories are Apache-2.0; its server/default is AGPL. The standard client is eligible after pinned dependency-tree review (`failover.md` §14). |
+

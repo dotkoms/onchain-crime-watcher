@@ -65,7 +65,8 @@ cargo run --locked -- --live --config config/local.toml --enable-paid --preview-
 
 `--preview-volume` wires live decoded events and real one-second timer ticks to the same core and
 prints fresh candidates to stdout/capture; health exposes active mints, warmup, candidate,
-unknown-history and saturation counters. It sends no signal webhooks. The existing optional
+unknown-history and saturation counters. Preview alone sends no signal webhooks. The separately
+opted-in staging sender is described in [staging-delivery.md](staging-delivery.md). The existing optional
 status/outage webhook can still post on a live collector failure if separately configured.
 The stdout preview path is diagnostic and has not been benchmarked as a production hot path.
 
@@ -85,8 +86,9 @@ billing cap. Default capture needs 2 GiB of free disk and retains a separate 2 G
 
 1. Provider credentials and funded data allowance, a selected mint/watch policy, sufficient disk,
    and a measured live paid-trade capture. Verify decoding, reference coverage and actual billing.
-2. A staging Discord signal channel plus delivery implementation/acceptance. The minimal existing
-   outage sender is not the signal sender. Prove expiry, rate limits, budgets and ambiguous POSTs.
+2. A staging Discord signal channel/webhook and real delivery acceptance. The staging sender is
+   implemented with local expiry/rate/budget/ambiguous-POST tests; write permissions and a real
+   live staged alert still need verification. The minimal outage sender stays separate.
 3. M1c reconnect/watchdog/heal and supervision, fault drills, and measured runtime resource use
    before unattended deployment. No automatic restart loop for the current collector.
 4. CTO, bundle and wallet families remain later scope milestones. Production volume delivery

@@ -8,7 +8,8 @@ Status: revision 6, 2026-10-25, planning corrections after review of revision 5:
 backtesting, hot failover between feeds, and exit alerts for watched wallets, all in v1. M1a is
 implemented; verification and remaining empirical acceptance are recorded in `docs/m1a.md` and
 `tasks/todo.md`. At the user's request, default startup is disconnected and real-data-only volume
-preparation proceeds without demos (`docs/real-data.md`). Live M1b acceptance and M1c remain pending.
+preparation proceeds without demos (`docs/real-data.md`). A staging sender is implemented behind
+explicit opt-in (`docs/staging-delivery.md`); real M1b acceptance and M1c remain pending.
 
 ## 0. Revision log
 

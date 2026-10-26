@@ -1,4 +1,4 @@
-# M1a configuration. Copy to config/local.toml for your machine.
+# Collector and optional staging configuration. Copy to config/local.toml for your machine.
 # Run from the repository root. data_dir must be a real private directory (0700),
 # or absent so ocw can create it. Secrets are environment-only, never TOML.
 data_dir = "data"
@@ -24,3 +24,12 @@ queue_capacity = 4096
 max_bytes = 2147483648
 retention_days = 14
 min_free_bytes = 2147483648
+
+# Only used with explicit --live --enable-staging-delivery. Webhook URL is environment-only.
+[delivery]
+# staging_channel_id = "YOUR_PUBLIC_DISCORD_CHANNEL_ID"
+queue_capacity = 64
+hourly_cap = 10
+daily_cap = 40
+burst = 2
+request_timeout_ms = 2000

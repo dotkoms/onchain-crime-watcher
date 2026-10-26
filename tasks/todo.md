@@ -23,3 +23,12 @@ External acceptance (not replaced by fixtures):
 - [x] Push review branch (`codex/real-data-ready`).
 
 Live acceptance above is deliberately deferred at the user's request, not marked passed.
+
+## Staging Discord sender
+
+- [x] Safe payload, queue/priority/expiry and rolling-budget tests.
+- [x] Durable pre-send reservation and message receipt journal.
+- [x] Webhook transport classification, rate limits and localhost HTTP tests.
+- [x] Explicit staging opt-in, live integration, health and safe shutdown.
+- [x] Documentation and complete local checks.
+- [ ] Push staging sender review branch.

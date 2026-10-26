@@ -27,4 +27,11 @@ Real-data-only preparation adds these constraints: default startup is disconnect
 sample events/signals; networking requires explicit `--live`; recorded replay is read-only and
 does not invent launch history or complete a partial bucket. Unit tests may construct artificial
 edge cases in isolation, but the application must not embed or run demo data. Signal candidates
-remain previews with delivery disabled. Existing build, spending and capture limits still apply.
+remain previews without explicit staging opt-in. Existing build, spending and capture limits still apply.
+
+The staging sender extension requires `--live --enable-staging-delivery`, a separate environment
+webhook and verified configured channel identity. Replay never sends. Reserve a durable intent
+before POST; ambiguous outcomes never retry. Honor freshness, rolling attention caps and global
+pauses. Bounded nonblocking admission and serialized sends are required. Artificial inputs stay
+inside isolated tests; no demo stream or test notification is supplied by the application.
+Production delivery remains disabled and real Discord/provider acceptance is reported separately.

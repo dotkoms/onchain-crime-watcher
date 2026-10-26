@@ -464,6 +464,6 @@ async fn automatic_watch_subscribes_on_the_same_socket_and_excludes_inactive_tra
     assert_eq!(replays[0]["active_mints"], 1);
     assert_eq!(
         replays[0]["volume"]["evaluated"],
-        result["volume"]["evaluated"]
+        result["volume"]["evaluated_buckets"]
     );
 }

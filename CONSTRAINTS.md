@@ -14,6 +14,11 @@ weaken a constraint to pass a check. No production signal delivery in M1a.
 | Capture queue, records, disk use and decoder state bounded | Untrusted stream cannot grow memory/disk indefinitely | Capture and decoder tests |
 | Localhost health only; secrets excluded from errors and snapshots | Keep credentials private | Config and runtime tests |
 
+The external dependency check is `cargo audit` (RustSec), run at task end and in CI; no known
+vulnerabilities may be ignored to make this increment pass. The advisory DB date and lockfile
+are recorded with verification evidence. Private fixtures and localhost tests do not prove
+provider coverage or billing correctness.
+
 Coverage and performance numbers remain measured targets until M1c; no coverage percentage has
 been invented for this first increment. Provider completeness, bill reconciliation and staging
 Discord acceptance require external credentials and are reported separately from local tests.

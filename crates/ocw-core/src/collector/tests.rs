@@ -85,6 +85,7 @@ async fn paid_stop_closes_first_socket_before_free_only_replacement() {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next()).await;
     });
     let secrets = Secrets {
+        rpc_url: None,
         api_key: Some("unit-test-key-do-not-log".into()),
         webhook: None,
         staging_webhook: None,

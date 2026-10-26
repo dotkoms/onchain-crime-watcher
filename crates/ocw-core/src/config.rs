@@ -14,6 +14,7 @@ pub struct Config {
     pub monitor: MonitorConfig,
     pub history: HistoryConfig,
     pub watch: crate::watch::Config,
+    pub probe: crate::probe::Config,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -106,6 +107,7 @@ impl Default for Config {
             monitor: MonitorConfig::default(),
             history: HistoryConfig::default(),
             watch: crate::watch::Config::default(),
+            probe: crate::probe::Config::default(),
         }
     }
 }
@@ -166,6 +168,7 @@ impl Config {
         {
             return Err("monitor limits or status channel are invalid".into());
         }
+        self.probe.validate().map_err(str::to_string)?;
         self.watch.validate().map_err(str::to_string)?;
         if self.feed.auto_watch && self.feed.mint.is_some() {
             return Err("choose automatic watching or one manual mint".into());

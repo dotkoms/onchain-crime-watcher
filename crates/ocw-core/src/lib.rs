@@ -23,3 +23,5 @@ pub mod chain;
 pub mod rpc;
 
 pub mod watch;
+
+pub mod probe;

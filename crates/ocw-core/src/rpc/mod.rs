@@ -298,6 +298,10 @@ impl Client {
         }
         Ok(value["result"].clone())
     }
+    #[cfg(test)]
+    pub(crate) fn test_endpoint(&mut self, url: Url) {
+        self.url = url;
+    }
     pub async fn signatures(
         &self,
         address: &str,

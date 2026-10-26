@@ -34,16 +34,17 @@ pub(crate) struct Secrets {
     pub api_key: Option<String>,
     pub webhook: Option<String>,
     pub staging_webhook: Option<String>,
+    pub rpc_url: Option<String>,
 }
 impl std::fmt::Debug for Secrets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(
-            "Secrets { api_key: [REDACTED], webhook: [REDACTED], staging_webhook: [REDACTED] }",
+            "Secrets { api_key: [REDACTED], webhook: [REDACTED], staging_webhook: [REDACTED], rpc_url: [REDACTED] }",
         )
     }
 }
 impl Secrets {
-    fn from_env(staging_enabled: bool) -> Result<Self, String> {
+    fn from_env(staging_enabled: bool, probe_enabled: bool) -> Result<Self, String> {
         let api_key = std::env::var("OCW_PUMPPORTAL_KEY")
             .ok()
             .filter(|s| !s.is_empty());
@@ -76,6 +77,16 @@ impl Secrets {
             api_key,
             webhook,
             staging_webhook,
+            rpc_url: if probe_enabled {
+                Some(
+                    std::env::var("SOLANA_RPC_URL")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .ok_or("SOLANA_RPC_URL is required for enabled probing")?,
+                )
+            } else {
+                None
+            },
         })
     }
 }
@@ -107,7 +118,8 @@ pub(crate) struct Pipeline {
     volume: Option<Engine>,
     delivery: Option<delivery::Handle>,
     history: Option<crate::history::Handle>,
-    pub last_trade: Option<([u8; 32], u64)>,
+    pub last_trade: Option<crate::feed::Trade>,
+    pub rpc: Option<crate::rpc::Client>,
 }
 impl Pipeline {
     fn record(&mut self, kind: &str, payload: Bytes) -> FrameStamp {
@@ -169,7 +181,7 @@ impl Pipeline {
         match self.decoder.decode(&bytes, now) {
             Ok(event) => {
                 if let Event::Trade(trade) = &event {
-                    self.last_trade = Some((trade.mint, trade.sol_lamports));
+                    self.last_trade = Some(trade.clone());
                 }
                 if let Some(history) = &self.history {
                     let data = match &event {
@@ -318,7 +330,7 @@ pub async fn run(
     let secrets = if options.fixture.is_some() {
         Secrets::default()
     } else {
-        Secrets::from_env(options.staging_delivery)?
+        Secrets::from_env(options.staging_delivery, config.probe.enabled)?
     };
     let endpoint =
         Url::parse("wss://pumpportal.fun/api/data").map_err(|_| "invalid built-in endpoint")?;
@@ -359,7 +371,9 @@ async fn run_inner(
             || (config.feed.mint.is_none() && !config.feed.auto_watch)
             || secrets.api_key.is_none())
     {
-        return Err("paid mode requires feed.mint, OCW_PUMPPORTAL_KEY, and live mode".into());
+        return Err(
+            "paid mode requires feed.mint or auto_watch, OCW_PUMPPORTAL_KEY, and live mode".into(),
+        );
     }
     if options.fixture.is_some() && config.monitor.enabled {
         return Err("monitoring requires explicit live collection".into());
@@ -367,10 +381,31 @@ async fn run_inner(
     if options.fixture.is_some() && config.history.enabled {
         return Err("durable history requires live operation".into());
     }
+    if config.probe.enabled && options.fixture.is_some() {
+        return Err("chain probing requires live collection".into());
+    }
     let lock = Arc::new(
         ProcessLock::acquire(&config.data_dir)
             .map_err(|_| "cannot acquire private data directory/collector lock")?,
     );
+    let rpc = if config.probe.enabled {
+        Some(
+            crate::rpc::Client::open(
+                secrets
+                    .rpc_url
+                    .as_deref()
+                    .ok_or("SOLANA_RPC_URL is required")?,
+                &config.data_dir,
+                lock.clone(),
+                config.probe.calls_per_day,
+                config.probe.calls_per_minute,
+            )
+            .await
+            .map_err(|_| "cannot initialize chain RPC (credentials redacted)")?,
+        )
+    } else {
+        None
+    };
     let listener = tokio::net::TcpListener::bind(config.health_bind)
         .await
         .map_err(|_| "cannot bind loopback health endpoint")?;
@@ -509,6 +544,7 @@ async fn run_inner(
         delivery,
         history: history.clone(),
         last_trade: None,
+        rpc,
     };
     pipeline.control("boot",json!({"config":config,"mode":if options.fixture.is_some(){"fixture"}else{"live"},"initial_state":"cold","decoder_schema":1}));
     println!(
@@ -712,6 +748,7 @@ pub(crate) fn pipeline_for_test(
             delivery: None,
             history: None,
             last_trade: None,
+            rpc: None,
         },
         records,
     )

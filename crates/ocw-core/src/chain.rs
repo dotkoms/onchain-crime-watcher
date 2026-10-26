@@ -194,9 +194,9 @@ pub fn decode(result: &Value, signature: &str) -> Result<Decoded, &'static str> 
     Ok(output)
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    fn raw(quote: [u8; 32]) -> Vec<u8> {
+    pub(crate) fn raw(quote: [u8; 32]) -> Vec<u8> {
         let mut b = TRADE.to_vec();
         b.extend([1; 32]);
         b.extend(123u64.to_le_bytes());
@@ -216,7 +216,7 @@ mod tests {
         b.extend([0; 40]);
         b
     }
-    fn tx(logs: Vec<String>) -> (Value, String) {
+    pub(crate) fn tx(logs: Vec<String>) -> (Value, String) {
         let sig = bs58::encode([3; 64]).into_string();
         (
             serde_json::json!({"slot":1,"blockTime":10,"transaction":{"signatures":[sig],"message":{"accountKeys":[bs58::encode([2;32]).into_string()]}},"meta":{"err":null,"fee":5000,"logMessages":logs}}),

@@ -29,6 +29,7 @@ enum Fault {
     Pong,
     Authentication,
     RateLimited,
+    Application,
 }
 impl Fault {
     fn label(self) -> &'static str {
@@ -43,6 +44,7 @@ impl Fault {
             Self::Pong => "pong_timeout",
             Self::Authentication => "authentication",
             Self::RateLimited => "provider_rate_limit",
+            Self::Application => "verified_missing_trades",
         }
     }
     fn terminal(self) -> bool {
@@ -330,6 +332,18 @@ async fn one(
     let mut healthy_since = opened;
     let mut heartbeat = Heartbeat::default();
     let mut app = CreateWatchdog::default();
+    let mut book = crate::probe::Book::default();
+    let mut probe_job: Option<crate::supervision::AbortOnDrop<Vec<crate::probe::ResultRow>>> = None;
+    let mut next_probe = 0;
+    let mut quiet_until = 0;
+    set_state(
+        &pipeline.health.probe_state,
+        if pipeline.rpc.is_some() {
+            "waiting"
+        } else {
+            "disabled"
+        },
+    );
     let mut ping = tokio::time::interval_at(
         opened + Duration::from_millis(config.recovery.ping_interval_ms),
         Duration::from_millis(config.recovery.ping_interval_ms),
@@ -350,8 +364,21 @@ async fn one(
             _=tokio::time::sleep_until(pong_deadline.unwrap_or(opened)),if pong_deadline.is_some()=>break End::Failure(Fault::Pong),
             _=tokio::time::sleep_until(last_receive+Duration::from_millis(config.recovery.transport_idle_ms))=>break End::Failure(Fault::Idle),
             _=tokio::time::sleep_until(expires),if budget.is_some() && planner.is_none()=>break End::Window,
+            result=async {probe_job.as_mut().expect("guarded probe job").await},if probe_job.is_some()=>{
+                probe_job = None;
+                let outcome = result.ok().map(|rows|crate::probe::classify(&book,&rows)).unwrap_or("unavailable");
+                pipeline.control("chain_probe",serde_json::json!({"outcome":outcome,"scope":"three_watched_curves","global_coverage_verified":false}));
+                set_state(&pipeline.health.probe_state,outcome);
+                if app.check(elapsed_ms(opened)) {
+                    if outcome == "missing_trades" {break End::Failure(Fault::Application);}
+                    if outcome == "sample_quiet" {quiet_until=pipeline.now_ms().saturating_add(config.probe.interval_s*1000);}
+                }
+            },
             _=tick.tick()=>{
-                if observe_application(&mut app,pipeline,elapsed_ms(opened)) {healthy_since=Instant::now();}
+                if pipeline.now_ms() < quiet_until && app.check(elapsed_ms(opened)) {
+                    set_state(&pipeline.health.application_state,"quiet_confirmed");
+                    set_state(&pipeline.health.feed_state,"connected");
+                } else if observe_application(&mut app,pipeline,elapsed_ms(opened)) {healthy_since=Instant::now();}
                 pipeline.health.pulse(&pipeline.health.pipeline_tick_ms);
                 if let Some(planner) = &mut planner {
                     let now = pipeline.now_ms();
@@ -360,6 +387,23 @@ async fn one(
                         break End::Failure(Fault::Write);
                     }
                     if planner.exhausted { break End::AdmissionCap; }
+                }
+                let now = pipeline.now_ms();
+                if let Some(planner) = &planner {book.retain(|key|planner.contains(key));}
+                if app.check(elapsed_ms(opened)) {
+                    if now < quiet_until {
+                        set_state(&pipeline.health.application_state,"quiet_confirmed");
+                        set_state(&pipeline.health.feed_state,"connected");
+                    }
+                    if now >= next_probe && probe_job.is_none() && let Some(rpc) = &pipeline.rpc {
+                        next_probe = now.saturating_add(config.probe.interval_s*1000);
+                        let samples = book.samples(now);
+                        if samples.len()==3 {
+                            let rpc = rpc.clone();
+                            probe_job=Some(crate::supervision::AbortOnDrop(tokio::spawn(async move {crate::probe::run(rpc,samples).await})));
+                            set_state(&pipeline.health.probe_state,"running");
+                        } else {set_state(&pipeline.health.probe_state,"insufficient_watched_cursors");}
+                    }
                 }
                 pipeline.tick_volume();
             },
@@ -399,9 +443,9 @@ async fn one(
                                 if matches!(kind,Some("buy"|"sell")) && !active {
                                     pipeline.discard_received(stamp,"inactive_subscription");
                                 } else {
-                                    pipeline.ingest_received(bytes,stamp,active);
-                                    if let Some((mint,lamports)) = pipeline.last_trade {
-                                        planner.trade(&mint,lamports,stamp.now_ms);
+                                    pipeline.ingest_received(bytes.clone(),stamp,active);
+                                    if let Some(trade) = &pipeline.last_trade {
+                                        planner.trade(&trade.mint,trade.sol_lamports,stamp.now_ms);
                                     }
                                 }
                                 if !send_actions(actions,pipeline,&mut socket,io_timeout).await {
@@ -409,8 +453,18 @@ async fn one(
                                 }
                                 if planner.exhausted { break End::AdmissionCap; }
                             }
-                        } else { pipeline.ingest(bytes); }
+                        } else { pipeline.ingest(bytes.clone()); }
+                        if let Some(planner) = &planner {book.retain(|key|planner.contains(key));}
                         if value(&pipeline.health.creates)>creates {
+                            let raw: Option<serde_json::Value> = serde_json::from_slice(&bytes).ok();
+                            if let Some(raw) = raw {
+                                let mint = raw["mint"].as_str().and_then(|s|crate::feed::key::<32>(s).ok());
+                                let curve = raw["bondingCurveKey"].as_str().and_then(|s|crate::feed::key::<32>(s).ok());
+                                if let (Some(mint),Some(curve)) = (mint,curve) {
+                                    let watched = planner.as_ref().map(|p|p.contains(&mint)).unwrap_or_else(||budget.is_some() && config.feed.mint.as_deref().is_some_and(|s|crate::feed::key::<32>(s)==Ok(mint)));
+                                    if watched {book.create(mint,curve,pipeline.now_ms());}
+                                }
+                            }
                             let first=!app.seen();
                             let recovered=app.observe(elapsed_ms(opened));
                             if recovered {inc(&pipeline.health.app_recoveries);}
@@ -418,6 +472,10 @@ async fn one(
                             set(&pipeline.health.create_received_ms,wall_ms());
                             observe_application(&mut app,pipeline,elapsed_ms(opened));
                         }
+                        if let Ok(raw) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                            && raw["txType"] == "migration"
+                            && let Some(mint) = raw["mint"].as_str().and_then(|s|crate::feed::key::<32>(s).ok()) {book.migrate(&mint);}
+                        if let Some(trade) = &pipeline.last_trade {book.trade(trade,pipeline.now_ms());}
                     },
                     Some(Ok(Message::Ping(_)))=>{
                         let until=heartbeat.deadline().map(|ms|opened+Duration::from_millis(ms)).unwrap_or(Instant::now()+io_timeout);

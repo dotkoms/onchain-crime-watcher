@@ -73,3 +73,11 @@ retain_min_lamports = 3000000000
 ttl_s = 1800
 keepalive_lamports = 500000000
 evict_margin_bps = 15000
+
+# Independent confirmed-chain watchdog samples, disabled until a separate RPC is supplied.
+# Requires three actually watched recent curve mints; manual one-mint mode cannot supply that.
+[probe]
+enabled = false
+calls_per_day = 50000
+calls_per_minute = 600
+interval_s = 30

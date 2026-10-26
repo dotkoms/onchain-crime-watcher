@@ -66,6 +66,7 @@ pub struct Health {
     pub feed_state: Mutex<&'static str>,
     pub capture_state: Mutex<&'static str>,
     pub capture_shutdown: Mutex<&'static str>,
+    pub probe_state: Mutex<&'static str>,
     pub paid_requested: AtomicU64,
     pub paid_state: Mutex<&'static str>,
     pub supervisor_state: Mutex<&'static str>,
@@ -221,7 +222,7 @@ impl Health {
             )
     }
     pub fn snapshot(&self) -> Value {
-        json!({"version":env!("CARGO_PKG_VERSION"),"milestone":"M1c-preparation","signals_enabled":value(&self.delivery_enabled)>0,"production_signals_enabled":false,
+        json!({"version":env!("CARGO_PKG_VERSION"),"milestone":"M1c-preparation","signals_enabled":value(&self.delivery_enabled)>0,"production_signals_enabled":false,"chain_probe":{"state":state(&self.probe_state),"global_coverage_verified":false},
             "supervision":{"state":state(&self.supervisor_state),"pipeline":state(&self.pipeline_state),"capture":state(&self.capture_worker_state),"delivery":state(&self.delivery_worker_state),"health":state(&self.health_worker_state),"pipeline_panics":value(&self.pipeline_panics),"pipeline_restarts":value(&self.pipeline_restarts),"failed_stages":value(&self.worker_failures)},
             "feed":{"state":state(&self.feed_state),"verification":"single-source, unverified","generation":value(&self.generation),"frames":value(&self.frames),"trades":value(&self.trades),"creates":value(&self.creates),"migrations":value(&self.migrations),"duplicates":value(&self.duplicates),"unresolved":value(&self.unresolved),"decode_errors":value(&self.decode_errors),"unusable_reserves":value(&self.unusable_reserves),"last_frame_ms":value(&self.last_frame_ms)},
             "recovery":{"reconnects":value(&self.reconnects),"exhausted":value(&self.recovery_exhausted),"backoff_ms":value(&self.backoff_ms),"last_failure":state(&self.last_failure)},

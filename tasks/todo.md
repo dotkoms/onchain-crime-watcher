@@ -20,6 +20,6 @@ External acceptance (not replaced by fixtures):
 - [x] Recorded-capture replay with real receive timing and no generated data.
 - [x] Disconnected default and opt-in live volume previews, with mode conflict tests.
 - [x] Runbook and complete local checks.
-- [ ] Push review branch.
+- [x] Push review branch (`codex/real-data-ready`).
 
 Live acceptance above is deliberately deferred at the user's request, not marked passed.

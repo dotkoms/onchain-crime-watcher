@@ -48,7 +48,7 @@ The library includes a bounded Solana JSON-RPC client: HTTPS only, eight concurr
 two-second timeout, 2 MiB responses, durable per-call reservations and persisted rolling rate
 limits/429 pauses. It has no transaction submission method. Set `[probe] enabled = true` and supply `SOLANA_RPC_URL` from an independent provider
 to use it for live watchdog probes. The shared daily/rate limits apply to all probe calls.
-Setting the URL alone does not enable networking. Probes do not implement gap healing.
+Setting the URL alone does not enable networking. Curve gap scans additionally require `probe.heal_enabled = true` and durable history.
 
 The Pump curve TradeEvent decoder binds signatures and validates the emitting program/log
 stack, complete current layout, explicit transaction success, slot and timestamp. It preserves
@@ -75,5 +75,31 @@ missing newer trades permit a watchdog reconnect, subject to the existing finite
 budget. The interrupted paid stream remains stopped. Quiet samples suppress another probe
 for the configured 30–300 seconds and remain explicitly single-source/global-unverified.
 Probe tasks have bounded request deadlines and are cancelled with their owning socket session.
-Transport failures remain independently actionable; per-gap healing and block fallback are
-still pending. None of this runs during configuration checks, disconnected startup or replay.
+Transport failures remain independently actionable; missed-create block fallback remains pending. None of this runs during configuration checks, disconnected startup or replay.
+
+## Bounded curve gap recovery
+
+With `probe.heal_enabled = true`, a socket failure followed by an allowed reconnect launches
+curve scans using the old session’s actual cursors. Scans continue alongside the free-only
+replacement connection; cancelled collection cancels its pending scans. Each gap is first
+recorded as partial. Recovery stopped by policy remains explicitly unhealed.
+
+A gap has at most two simultaneous curve jobs, a 120-second deadline, 1,200 RPC calls,
+1,000 total signatures and 8,192 output events. Each curve needs an observed cursor in a
+bounded signature page. Confirmed blocks establish transaction order within up to 150 slots;
+signatures are never sorted alphabetically as a substitute for chain order. Missing cursors,
+null transactions, unsupported event layouts and exhausted limits remain partial. Global
+RPC spend/rate limits are shared with probes and survive restarts.
+
+`healed_chain_batch` records contain up to 16 native events, exact integer amounts, slot,
+block transaction position, instruction event index and original source generation. The whole
+transaction fee remains metadata. Batch and result records flow through the durable journal’s
+bounded queue; a storage failure or overflow invalidates durability rather than claiming success.
+
+These records are separate audit evidence. They never enter live volume rings, generate a
+Discord signal, or get summed with live observations. Live overlap remains unresolved until
+full historical decision replay implements reconciliation. `curve_scan_complete` describes
+only the scanned curve interval, not whole-system coverage. Missed creates, migrated-pool
+history, durable detector snapshots and full accounting reconciliation remain pending.
+
+Block ordering follows [Solana getBlock](https://solana.com/docs/rpc/http/getblock).

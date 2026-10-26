@@ -60,12 +60,14 @@ enum End {
 struct Exit {
     end: End,
     healthy_ms: u64,
+    cursors: Vec<crate::probe::Sample>,
 }
 impl Exit {
     fn failed(fault: Fault) -> Self {
         Self {
             end: End::Failure(fault),
             healthy_ms: 0,
+            cursors: Vec::new(),
         }
     }
 }
@@ -152,6 +154,7 @@ pub(crate) async fn live(
         }
     }
     let mut paid = budget.is_some();
+    let mut healing: Option<crate::supervision::AbortOnDrop<Vec<crate::heal::Report>>> = None;
     loop {
         pipeline.decoder.reset_session();
         pipeline.reset_volume();
@@ -163,10 +166,14 @@ pub(crate) async fn live(
             secrets,
             &endpoint,
             if paid { budget.as_mut() } else { None },
+            &mut healing,
         )
         .await;
         match exit.end {
             End::Failure(fault) => {
+                if config.probe.heal_enabled {
+                    pipeline.control("coverage_gap",serde_json::json!({"generation":pipeline.generation,"state":"partial","reason":"socket_gap","creates":"unhealed","live_baseline":"cold"}));
+                }
                 set_state(&pipeline.health.feed_state, "reconnecting");
                 set_state(&pipeline.health.transport_state, "failed");
                 set_state(&pipeline.health.last_failure, fault.label());
@@ -205,9 +212,32 @@ pub(crate) async fn live(
                     let event = serde_json::json!({"event":"recovery_stopped","reason":reason,"class":fault.label()});
                     pipeline.control("recovery_stopped", event.clone());
                     println!("{event}");
+                    if config.probe.heal_enabled {
+                        set_state(&pipeline.health.heal_state, "unhealed_recovery_stopped");
+                        pipeline.control(
+                            "heal_unavailable",
+                            serde_json::json!({"reason":"recovery_stopped","state":"partial"}),
+                        );
+                    }
                     set_state(&pipeline.health.feed_state, "failed");
                     return Err("feed connection ended (endpoint and credentials redacted)".into());
                 };
+                if config.probe.heal_enabled {
+                    if healing.is_none()
+                        && let Some(client) = &pipeline.rpc
+                    {
+                        let client = client.clone();
+                        healing = Some(crate::supervision::AbortOnDrop(tokio::spawn(
+                            crate::heal::run(client, exit.cursors, pipeline.generation),
+                        )));
+                        set_state(&pipeline.health.heal_state, "scanning");
+                    } else {
+                        pipeline.control(
+                            "heal_unavailable",
+                            serde_json::json!({"reason":"previous_gap_active","state":"partial"}),
+                        );
+                    }
+                }
                 set(&pipeline.health.backoff_ms, delay);
                 set_state(&pipeline.health.transport_state, "backoff");
                 pipeline.control(
@@ -246,6 +276,7 @@ async fn one(
     secrets: &Secrets,
     endpoint: &Url,
     mut budget: Option<&mut Budget>,
+    healing: &mut Option<crate::supervision::AbortOnDrop<Vec<crate::heal::Report>>>,
 ) -> Exit {
     let mut url = endpoint.clone();
     if let Some(key) = &secrets.api_key {
@@ -364,6 +395,16 @@ async fn one(
             _=tokio::time::sleep_until(pong_deadline.unwrap_or(opened)),if pong_deadline.is_some()=>break End::Failure(Fault::Pong),
             _=tokio::time::sleep_until(last_receive+Duration::from_millis(config.recovery.transport_idle_ms))=>break End::Failure(Fault::Idle),
             _=tokio::time::sleep_until(expires),if budget.is_some() && planner.is_none()=>break End::Window,
+            result=async {healing.as_mut().expect("guarded heal task").await},if healing.is_some()=>{
+                *healing=None;
+                match result {
+                    Ok(reports)=>record_heals(pipeline,reports),
+                    Err(_)=>{
+                        set_state(&pipeline.health.heal_state,"failed");
+                        pipeline.control("heal_unavailable",serde_json::json!({"reason":"worker_failed","state":"partial"}));
+                    }
+                }
+            },
             result=async {probe_job.as_mut().expect("guarded probe job").await},if probe_job.is_some()=>{
                 probe_job = None;
                 let outcome = result.ok().map(|rows|crate::probe::classify(&book,&rows)).unwrap_or("unavailable");
@@ -501,7 +542,11 @@ async fn one(
     set_state(&pipeline.health.feed_state, "closing");
     let _ = timeout(Duration::from_secs(1), socket.close(None)).await;
     pipeline.control("session_close",serde_json::json!({"reason":match end {End::Budget=>"budget",End::Window=>"window",End::AdmissionCap=>"admission_cap",End::Failure(fault)=>fault.label()}}));
-    Exit { end, healthy_ms }
+    Exit {
+        end,
+        healthy_ms,
+        cursors: book.cursors(),
+    }
 }
 fn elapsed_ms(opened: Instant) -> u64 {
     opened.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
@@ -610,4 +655,38 @@ async fn send_actions(
         pipeline.control("subscription", command);
     }
     true
+}
+
+fn record_heals(pipeline: &mut Pipeline, reports: Vec<crate::heal::Report>) {
+    let partial = reports.is_empty()
+        || reports
+            .iter()
+            .any(|r| r.stop != crate::heal::Stop::Complete);
+    for report in reports {
+        let mint = bs58::encode(report.sample.mint).into_string();
+        let anchor = bs58::encode(report.sample.signature).into_string();
+        for chunk in report.trades.chunks(16) {
+            let events: Vec<_> = chunk.iter().map(|recovered| {
+                let event=&recovered.event;
+                let trade=&event.trade;
+                serde_json::json!({
+                    "signature":bs58::encode(trade.signature).into_string(),"event_index":event.event_index,
+                    "slot":event.slot,"transaction_index":recovered.transaction_index,"block_time_ms":event.block_time_ms,
+                    "trader":bs58::encode(trade.trader).into_string(),"side":if trade.side==crate::feed::Side::Buy {"buy"}else{"sell"},
+                    "tokens_raw":trade.token_amount.to_string(),"sol_lamports":trade.sol_lamports.to_string(),
+                    "transaction_fee_lamports":event.transaction_fee.to_string(),"fee_payer":bs58::encode(event.transaction_fee_payer).into_string()
+                })
+            }).collect();
+            pipeline.control("healed_chain_batch",serde_json::json!({"source":"independent_rpc","source_generation":report.generation,"mint":mint,"anchor":anchor,"healed":true,"live_overlap":"unresolved","applied_to_detectors":false,"events":events}));
+        }
+        pipeline.control("curve_heal_result",serde_json::json!({"mint":mint,"anchor":anchor,"source_generation":report.generation,"from_observed_mono_ms":report.sample.observed_ms,"outcome":report.stop.label(),"calls":report.calls,"signatures":report.signatures,"chain_events":report.trades.len(),"global_coverage":"partial","creates":"unhealed","applied_to_detectors":false}));
+    }
+    set_state(
+        &pipeline.health.heal_state,
+        if partial {
+            "partial"
+        } else {
+            "curve_scans_complete_global_partial"
+        },
+    );
 }

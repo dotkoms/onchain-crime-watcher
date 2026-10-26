@@ -168,6 +168,9 @@ impl Config {
         {
             return Err("monitor limits or status channel are invalid".into());
         }
+        if self.probe.heal_enabled && (!self.probe.enabled || !self.history.enabled) {
+            return Err("healing requires enabled independent probing and durable history".into());
+        }
         self.probe.validate().map_err(str::to_string)?;
         self.watch.validate().map_err(str::to_string)?;
         if self.feed.auto_watch && self.feed.mint.is_some() {

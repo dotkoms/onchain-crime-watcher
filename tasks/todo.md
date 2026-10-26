@@ -86,7 +86,8 @@ Reliability foundations (increment within the requested reliability step):
 - [x] Deterministic bounded automatic watch admission on the shared single paid socket.
 - [x] Bounded read-only RPC transport and strict native Pump curve event decoding library.
 - [x] Wire independent three-mint watchdog probes with live-race and stale-RPC guards.
-- [ ] Wire bounded chain healing and missed-create block fallback into the collector.
+- [x] Bound curve gap scans, recover ordered native audit deltas and preserve partial coverage.
+- [ ] Missed-create block fallback, migrated-pool recovery and live/history reconciliation.
 - [ ] Complete family state checkpoints and full decision replay before claiming coverage recovery.
 
 See [history and watch runbook](../docs/history.md). No live provider or Discord acceptance

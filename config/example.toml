@@ -78,6 +78,8 @@ evict_margin_bps = 15000
 # Requires three actually watched recent curve mints; manual one-mint mode cannot supply that.
 [probe]
 enabled = false
+# Audit-only bounded curve gap scans; requires history.enabled and finite reconnects.
+heal_enabled = false
 calls_per_day = 50000
 calls_per_minute = 600
 interval_s = 30

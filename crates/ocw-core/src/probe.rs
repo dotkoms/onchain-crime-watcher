@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, VecDeque};
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub enabled: bool,
+    pub heal_enabled: bool,
     pub calls_per_day: u64,
     pub calls_per_minute: usize,
     pub interval_s: u64,
@@ -15,6 +16,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             enabled: false,
+            heal_enabled: false,
             calls_per_day: 50_000,
             calls_per_minute: 600,
             interval_s: 30,
@@ -94,6 +96,13 @@ impl Book {
                 row.recent.pop_front();
             }
         }
+    }
+    pub fn cursors(&self) -> Vec<Sample> {
+        self.rows
+            .values()
+            .filter(|row| !row.migrated)
+            .map(|row| row.sample.clone())
+            .collect()
     }
     pub fn samples(&self, now: u64) -> Vec<Sample> {
         let mut rows: Vec<_> = self

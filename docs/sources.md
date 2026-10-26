@@ -1,7 +1,8 @@
 # Data sources — onchain-crime-watcher
 
 Reference for builders and reviewers. As of 2026-10-25. Contract: [`../SCOPE.md`](../SCOPE.md)
-(revision 2, Q1–Q6 / R1–R9). Siblings: `feed.md`, `bundle.md`, `ranking.md`, `operations.md`.
+(revision 5, Q1–Q6 / R1–R12). Siblings: `feed.md`, `bundle.md`, `ranking.md`, `operations.md`,
+`backtest.md`, `failover.md`.
 
 Evidence tags:
 
@@ -24,8 +25,8 @@ Evidence tags:
 | Helius RPC docs | `helius.dev/docs`, `getTransfersByAddress` reference | Method is Helius-only; credit cost not stated on those pages (**D/C**) |
 
 Not checked here: any live PumpPortal **trade** subscription, any paid RPC call, Discord limits, any
-Geyser provider. Those claims are **U**/**V**. No trade frame was captured for this document;
-`REVIEW.md` B4 is the only captured trade payload in evidence.
+Geyser provider, or any secondary-provider client license. Those claims are **U**/**V**. No trade
+frame was captured for this document; `REVIEW.md` B4 is the only captured trade payload in evidence.
 
 ## 1. Coverage matrix by venue
 
@@ -73,7 +74,9 @@ Constraints (**D**): one websocket at a time; repeated connection attempts may b
 expire hourly; trade and account subscriptions require a key linked to a wallet holding **≥ 0.02 SOL**;
 metering is per message received, `SOL/day = messages_per_s × 86,400 / 10,000 × 0.01`. At a
 hypothetical 300 msg/s that is ~26 SOL/day; real rate unmeasured until M1. Balance-exhaustion
-behaviour is **U** — monitor with `getBalance` and alert below a floor.
+behaviour is **U** — monitor with `getBalance` and alert below a floor. The one-socket limit is per
+provider: a second PumpPortal socket or a second key is a ban risk and is not a failover path. A
+second feed means a second provider (`failover.md` §0–1).
 
 Latency: 100–500 ms new-token (`SCOPE.md` §4), 200–1,000 ms trade (`README.md`). Estimates (**U**);
 M1 measures per-stage histograms at a stated rate.
@@ -150,18 +153,26 @@ The client has no age field and silently keeps the last price (`ingest.mjs:64`).
 `sol_usd_age_ms` on every USD figure; past max age, show `USD unavailable` and keep SOL math — the
 signal never depends on FX.
 
-### 2.5 Yellowstone Geyser
+### 2.5 Yellowstone Geyser and the secondary feed
 
+- **Role.** From M6 this is the **warm standby** in `failover.md`: a full second pipeline, not a
+  sample. It is promoted only when the primary is banned, failed or out of contact beyond the
+  outage threshold; it is never summed with the primary.
 - **Provides:** gRPC transaction or account stream filtered by account/program, at a chosen
   commitment; carries slot, `blockTime`, instructions, pre/post balances. The only source here that
   could prove completeness rather than liveness.
-- **Cost:** paid, provider-specific, **U**; own decode required; later per §7, not an M1 dependency.
+- **Cost:** paid, provider-specific, **U**; own decode required. Not an M1 dependency; it gates M6.
+- **License:** the `yellowstone-grpc` client is **AGPL-3.0** (`references.md` licensing summary).
+  It must not be linked into this MIT binary. M6 ships only with a permissively licensed provider
+  SDK or a client generated from permissively licensed proto definitions, and CI denies copyleft
+  licences in the binary's dependency tree (`failover.md` §14).
 - **Latency:** 10–100 ms is an estimate (**U**); measure against the same window as PumpPortal.
 - **Failure:** provider drops are invisible without slot-continuity accounting; a filter change
   silently stops matching; reconnect needs a slot cursor or the gap returns at higher cost.
   Commitment choice changes latency and fork exposure and must be stated.
 - **Cannot prove:** that every slot arrived, unless the bot counts slots itself. Raw truth about
-  what arrived is not a completeness guarantee. A shadow with its own gaps cannot certify a primary.
+  what arrived is not a completeness guarantee. A standby with its own gaps cannot certify a
+  primary, and two feeds may share upstream infrastructure — the RPC shadow stays.
 
 ## 3. Observed payload schemas
 
@@ -242,6 +253,11 @@ C1 captures a real frame. If it carries a pool, C5 is a lookup; if not, resolve 
 | SOL/USD ticker | No | No | No | No | No | No | No |
 | Geyser | Yes | Yes | Yes | Decode-dependent | Decode-dependent | Fee payer | Via meta |
 
+A secondary adapter that decodes the instruction amount records `sol_source = Instruction`; the
+trade shape and detections are unchanged, and each source keeps its own dedup and generation stream
+(`failover.md` §6). A source without slot and block time cannot be authoritative for the ranking
+audit or for two-source replay, whatever its trade feed looks like.
+
 Derived values, and how far each travels (label on the card):
 
 | Value | Derivation | Validity |
@@ -271,7 +287,9 @@ Derived values, and how far each travels (label on the card):
 | C10 | M3 | CTO retention: poll 60 s for 48 h; record count, oldest/newest `claimDate`, disappearance order | Retention floor and maximum safe restart window; high-water file proven by restarting mid-run |
 | C11 | M4 | Funding cost: 10 wallets through signatures+transactions and through `getTransfersByAddress` | Wall time and credits per wallet for both; confirm plan and price in dashboard; record any funder one path finds and the other misses |
 | C12 | M2b/M5 | SOL/USD staleness: cut the ticker | After max age, cards show USD unavailable with `sol_usd_age_ms`; no alert suppressed or altered |
-| C13 | Later | Geyser shadow: one mint, 10 min, slot-continuous | Signature-set disagreement reported; slot gaps counted separately from trade gaps |
+| C13 | M6 | Secondary shadow: one mint, 10 min, slot-continuous, against the primary | Signature-set disagreement reported; slot gaps counted separately from trade gaps; both sources' buckets never merged |
+| C14 | M6 | Provider selection: read the client license, measure filter cap, events/s, latency and spend for at least two candidates | One candidate passes the copyleft gate and carries slot and block time; `feed.secondary.filters` set from measurement, pricing recorded with a date |
+| C15 | M6 | Forced-failure drill: 20 primary failures (close, ban, stall) and 20 secondary failures | Every primary failure switches within `switch_after_s + 5 s`; secondary failures do not switch; zero duplicates, boundary frames exact, warm rings preserved (`failover.md` §12) |
 
 ## 6. Credentials and prerequisites
 
@@ -283,7 +301,7 @@ Derived values, and how far each travels (label on the card):
 | DexScreener | None | Free | Yes | CTO degrades independently of trade health |
 | SOL/USD | None (Binance); Pyth key **U** | Free / RPC | Yes | USD with age, then unavailable; SOL math unaffected |
 | Discord | 3 production + 3 staging webhooks; optional bot token | None | `--dry` | Startup check before feed; dead-hook breaker |
-| Geyser | Provider key + gRPC | Paid **U** | Yes, not built | State stays `unverified` |
+| Geyser / secondary | Provider key + gRPC | Paid **U** | Yes until M6 | Runs single-source with `authoritative = primary`; the boot line says failover unavailable; the license gate blocks M6 |
 
 The PumpPortal key rides in the URL query: redact the URL before logging (`operations.md`).
 
@@ -301,6 +319,8 @@ The PumpPortal key rides in the URL query: redact the URL before logging (`opera
 | SOL/USD | Silent stale rate | USD figures wrong; signals unaffected | R9 + age. **Missing:** age does not exist in the client |
 | Discord | 429 storm or IP ban from invalid requests | All channels mute | Per-hook queue, error-code classes (§8). Sufficient if implemented |
 | Geyser | Provider drops slots without signalling | False "complete" shadow — worse than none | Slot continuity, per-window disagreement. **Missing:** a gappy shadow may not certify the primary |
+| Secondary provider (M6) | Drops slots without signalling, or shares upstream infrastructure with the primary | A promoted source that is not better; false confidence after a switch | Slot continuity, per-window disagreement, forced-failure drills. **Missing:** no proof of independence between providers |
+| Secondary client license | An AGPL client is linked into an MIT binary | A license violation across the whole project | CI deny-list, C14 license read before M6 starts, `references.md` records the client and version |
 
 ## 8. Open questions and recommendations
 
@@ -317,4 +337,5 @@ The PumpPortal key rides in the URL query: redact the URL before logging (`opera
 | Is CTO retention long enough for a documented restart? | Restart safety is bounded, not guaranteed: a claim first seen below the high-water is not recovered | Measure 48 h; publish max downtime | C10 |
 | Is the ~11-credit funding estimate right? | Bundle cost per CTO | Measure both RPC paths, choose on measured latency and credits | C11 |
 | Do Bonk.fun or Meteora appear in the launch stream? | Mints outside pump.fun break curve assumptions | Attribute captured creates by program and pair `dexId`; if present, tag launchpad and refuse curve math | C1 |
-| Should Geyser become primary? | Only source that could prove completeness | Not before shadow disagreement data; adopt as shadow first | C13 |
+| Should Geyser become primary? | Only source that could prove completeness | Not in v1: it is the M6 warm standby, and `prefer = primary` stays the default. Promoting it needs a week of two-source agreement and a written decision | C13, C15 |
+| Which secondary provider passes the license gate? | The M6 adapter is gated on a permissive client or generated proto, not on the transport name | A Geyser-protocol provider whose client is MIT/Apache-2.0, or our own client generated from permissive protos; read the license before any code | C14 |

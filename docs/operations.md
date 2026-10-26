@@ -1,31 +1,37 @@
 # operations — process, configuration, observability
 
-Status: design for M1, 2026-10-25. Contract: [`../SCOPE.md`](../SCOPE.md) revision 2 (§4–§9, R5,
-R8); this file adds runtime shape, key names and procedures and changes no decision. Siblings:
-`feed.md`, `volume.md`, `delivery.md`, `bundle.md`, `ranking.md`, `sources.md`. The rank-store
-schema ships in M1; `rank.writer` and `rank.job` start in M2a. Every invented number is **PRIOR**
-with its reason; contract numbers are marked CONTRACT.
+Status: design for M1, 2026-10-25. Contract: [`../SCOPE.md`](../SCOPE.md) revision 5 (§4–§9, R5,
+R8, R10–R12); this file adds runtime shape, key names and procedures and changes no decision.
+Siblings: `feed.md`, `volume.md`, `delivery.md`, `bundle.md`, `ranking.md`, `sources.md`,
+`backtest.md`, `failover.md`. The rank-store
+schema ships in M1; `rank.writer` and `rank.job` start in M2a; the capture recorder ships in M1 and
+replay is offline. Every invented number is **PRIOR** with its reason; contract numbers are marked
+CONTRACT.
 
 ## 0. Budget, and what this file will not claim
 
 Alert budget, stated before any threshold below: **volume 10/h, burst 3, 40/day, near ≤ 30%**;
-**wallets 6/h, burst 2, 20/day**; **CTO 20/h safety cap, burst 2, 120/day**. Status, outage and
-heartbeat edits bypass all of it (`delivery.md` §3); the 5-minute heartbeat is a cadence, not an
-alert-budget input. Nothing in this file raises a cap.
+**wallets 6/h with exits sub-capped at 3/h, burst 2, 20/day**; **CTO 20/h safety cap, burst 2,
+120/day**. Status, outage and heartbeat edits bypass all of it (`delivery.md` §3); the 5-minute
+heartbeat is a cadence, not an alert-budget input. Nothing in this file raises a cap.
 
-The ~40-wallet watch set is a discovery set, not a delivery promise: ~120 candidates/day against
-the 20/day cap means ~83% are suppressed by budget and counted `wallet_budget_suppressed`. SOL
-values entering admission or a card are `sol_lamports` with `sol_source = Payload | ReserveDelta`;
-nothing reads raw `solAmount`.
+The ~40-wallet watch set is a discovery set, not a delivery promise: ~120 entry candidates/day plus
+exits on observed positions, ~240 candidates/day against the 20/day cap, so roughly 92% are
+suppressed by budget and counted `wallet_budget_suppressed`. SOL values entering admission or a card
+are `sol_lamports` with `sol_source = Payload | ReserveDelta | Instruction`; nothing reads raw
+`solAmount`.
 
 Observed, not recorded: counters, histograms, heartbeat, boot line, windowed rings, shadow
-disagreement. Not recorded: trades, token history, alert outcomes, message ids, dedup state. So no
-hit rate, precision, recall or base rate; cohort context is only the live percentile in RAM
-(`volume.md` §4); nothing is replayable; a restart re-alerts; a silent drop is invisible until the
-M2b shadow. The side store is off the alert path. Left out on purpose: trade archive, backtest,
-per-event tasks, hot failover, and every metric requiring them.
+disagreement. Recorded, off the alert path: raw frames for replay (`backtest.md`), rank and launch
+records, coverage, CTO high-water. Not recorded: trades as an archive, alert outcomes, message ids,
+dedup state. So no hit rate, precision, recall or base rate; cohort context is only the live
+percentile in RAM (`volume.md` §4); nothing on the alert path is replayable; a restart re-alerts; a
+silent drop is invisible until the M2b shadow. The side stores and the capture tap are off the alert
+path. Left out on purpose: a trade archive, per-event tasks, and every metric requiring outcome
+labels. Backtesting (capture plus offline replay) and hot failover (a second provider, M6) are in
+scope; neither is a live dependency.
 
-Lifecycle validity: volume only `on_curve`/`migrated` with a re-warmed ring, never across the boundary; CTO/bundle only from a listing (record or `no launch record`); wallets only warm.
+Lifecycle validity: volume only `on_curve`/`migrated` with a re-warmed ring, never across the boundary; CTO/bundle only from a listing (record or `no launch record`); wallets only warm, and exits only for an episode live matching observed. A cold or evicted position forfeits its exit rather than inventing a basis.
 
 ## 1. Process and task topology
 
@@ -33,14 +39,15 @@ Single binary, tokio multi-thread runtime, `panic = "unwind"`. One decode+detect
 Registry is data, not a task: the pipeline task is its only mutator.
 
 ```
-SIGTERM ─▶ main / supervisor (JoinSet, budget, shutdown)
+SIGTERM ─▶ main / supervisor (JoinSet, budget, shutdown, failover controller)
               │
-   ┌──────────┼────────────┬──────────────┬─────────────┐
-   ▼          ▼            ▼              ▼             ▼
-feed.session feed.pipeline feed.watchdog gate actor    rpc.client
- (socket)     (decode+detect, + heal jobs (ledger,      (semaphore,
-   │ Frame    registry, dedup, (≤2 gaps,   reconcile)   no task/call)
-   └─────────▶ volume close)   RPC budget)
+   ┌──────────┼──────────────┬───────────────┬─────────────┬──────────────┐
+   ▼          ▼              ▼               ▼             ▼              ▼
+feed.session[p] feed.pipeline[p] feed.watchdog  gate planner  rpc.client  capture.writer
+feed.session[s] feed.pipeline[s] + heal jobs    + ledger[p]   (semaphore,  (frames → disk,
+ (one socket)   (decode+detect,  (≤2 gaps,       + ledger[s]    no task/call) loss counted)
+   │ Frame       registry, dedup, RPC budget)         │
+   └────────────▶ volume close)                       │
                  ├─▶ cto.poll ─▶ bundle.funding ─▶ bundle.writer
                  ├─▶ rank.writer ─▶ rank.job (weekly)
                  ├─▶ delivery.{volume,wallets,cto,status} (one in-flight each)
@@ -49,11 +56,13 @@ feed.session feed.pipeline feed.watchdog gate actor    rpc.client
 
 | Task | Count | Owns (single writer) | Receives → emits | Cost, latency |
 |---|---|---|---|---|
-| root + supervisor | 1 | JoinSet, config ArcSwap, cancel tree | signals → spawn/restart | no network |
-| `feed.session` | 1 | socket, read buffer, generation | `SocketCmd` → `Frame` (delta, 1024) | upstream 100–500 ms; ~0.6 MB/s peak |
-| `feed.pipeline` | 1 | decode scratch, dedup, registry + eviction, volume rings, cohort cells | `Frame` → gate cmds, alerts, counters | 5–15 µs/trade typical, < 2 ms p99; ~2% of a core at 1500 msg/s |
-| `feed.watchdog` + `feed.heal` | 1 each + ≤2 gap jobs | EWMA, probe cursor, gap cursors, call budget | tick/reconnect → probes, healed aggregates | 3 RPC calls per suspicion; heal ≤600 calls/min, ≤120 s |
-| `gate` actor | 1 | ledger, caps, desired set | create/trade/CTO/tick → `SocketCmd` | 5 s reconcile; no HTTP |
+| root + supervisor + failover | 1 | JoinSet, config ArcSwap, cancel tree, `authoritative`, flap guard | signals/states → spawn, restart, switchover | no network; 1 s arbitration tick |
+| `feed.session[p]`, `feed.session[s]` | 1 each (M6) | socket, read buffer, generation | `SocketCmd` → `Frame` (delta, 1024) | upstream 100–500 ms; ~0.6 MB/s peak each |
+| `feed.pipeline[p]`, `feed.pipeline[s]` | 1 each (M6) | decode scratch, dedup, registry + eviction, volume rings, cohort cells | `Frame` → gate cmds, alerts, counters | 5–15 µs/trade typical, < 2 ms p99; ~2% of a core each at 1500 msg/s |
+| `feed.watchdog` + `feed.heal` | 1 each per source + ≤2 gap jobs | EWMA, probe cursor, gap cursors, call budget | tick/reconnect → probes, healed aggregates | 3 RPC calls per suspicion; heal ≤600 calls/min, ≤120 s |
+| `gate` planner | 1 | shared desired set, caps, retention decisions | creates/trades/CTO/tick → desired snapshot | 5 s reconcile; no HTTP |
+| `gate` ledger[p], ledger[s] | 2 (M6) | per-source subscription state, `SubGen`, retries | desired → `SocketCmd` | no HTTP |
+| `capture.writer` | 1 | segments, `.idx`, manifest, capture gaps | frame tap (bounded, event class) → disk | ~1 s flush; ~60–90 MB/day; never backpressures decode |
 | `cto.poll` | 1 | seen-set, latch, high-water | 60 s timer → listing alerts | 1 request/60 s; vendor body small |
 | `bundle.funding` | 1 + ≤8 in-flight | funding cache, per-run budget | CTO job → record + edit | 120 s deadline, ≤1200 calls |
 | `bundle.writer` | 1 | launch segments, index | records (bounded 4096) | commit ≤250 ms/64 records, fsync |
@@ -63,13 +72,16 @@ feed.session feed.pipeline feed.watchdog gate actor    rpc.client
 | `heartbeat` + `health.server` + `deadman` | 3 | heartbeat ref, snapshot, ping | timer/GET → edit/ping | edit/5 min; local GET; ping/60 s |
 
 M1 ships the rank-store schema, row format and coverage journal; `rank.writer` and `rank.job` start
-in M2a, so M1 acceptance exercises no rank task.
+in M2a, so M1 acceptance exercises no rank task. M1 also ships `capture.writer`; replay is an
+offline subcommand and never a production task. M6 adds the second session and pipeline and the
+failover controller.
 
 **Never spawned per event, mint, alert, call or signature.** No task per trade, subscription,
 mint, RPC call, CTO, buyer, heal signature, alert or send; bucket closes use one 100 ms ticker over
 a deadline-ordered set, not one timer per mint. Heal uses ≤2 jobs; RPC uses a semaphore. Invariants:
-`sockets_open ≤ 1`; `frames_dropped == 0`; one in-flight per webhook; registry mutated only by
-`feed.pipeline`; all channels bounded and classed; zero trade-path allocations after warmup.
+`sockets_open[provider] ≤ 1` and `sockets_open_total ≤ 2`; `frames_dropped == 0`; one in-flight per
+webhook; registry mutated only by its source's `feed.pipeline`; exactly one pipeline authoritative;
+all channels bounded and classed; zero trade-path allocations after warmup.
 
 **Shutdown order** (SIGTERM/SIGINT; SIGHUP is reload, not shutdown):
 
@@ -78,12 +90,13 @@ a deadline-ordered set, not one timer per mint. Heal uses ≤2 jobs; RPC uses a 
 3. Pipeline drains frames; discard the partial bucket (`shutdown_partial_dropped`).
 4. Delivery flushes ready and held candidates until `ops.shutdown.flush_deadline_ms`; leftovers
    count as `drop_shutdown`.
-5. Rank writer flushes and `fdatasync`s; bundle writer commits and fsyncs; CTO high-water is
-   already synced per advance.
+5. Rank writer flushes and `fdatasync`s; bundle writer commits and fsyncs; capture writer seals the
+   segment and manifest and records the shutdown seq; CTO high-water is already synced per advance.
 6. Deadman sends a final `stopping` ping; health closes. Exit 0 only if every flush met its
    deadline, else 1, inside `ops.shutdown.hard_timeout_ms`.
 
-A restart is not a resume: counters reset, rings are cold, ids are gone, and the boot line says so.
+A restart is not a resume: counters reset, rings are cold, ids are gone, open wallet positions are
+unpaired and forfeit their exits, and the boot line says so.
 
 ## 2. Supervision, restart budget, red
 
@@ -102,11 +115,12 @@ A restart is not a resume: counters reset, rings are cold, ids are gone, and the
   Gate: ledger rebuilt, all subscriptions re-sent under a new `SubGen`. Delivery: queue, ids and
   cooldowns lost (`deliver_state_lost`). CTO: high-water survives. Rank/bundle: at most the
   uncommitted window, and coverage opens a gap.
-- **Process red** = any subsystem red, `sockets_open > 1`, `frames_dropped > 0`, or
+- **Process red** = any subsystem red, `sockets_open[provider] > 1`, `sockets_open_total > 2`,
+  `frames_dropped > 0`, `authoritative = none` while a provider is configured, or
   `monotonic_violations > 0`. Red never exits; the dead-man's switch is the attention path.
   Subsystems are `trade_stream`, `cto_source`, `rpc`, `discord:volume`, `discord:wallets`,
   `discord:cto` — six outage identities; each degrades alone with its own outage identity and
-  state.
+  state. A switchover is not one of them.
 
 ## 3. Configuration
 
@@ -130,6 +144,15 @@ boot-only, `H` = hot. Secrets are always `B` and are env-only.
 | `feed.shadow.mints` / `bottom_mints` / `window_s` / `rpc_lag_s` / `tolerance` | mints / mints / s / s / frac | 20 / 5 / 600 / 60 / 0.05 | `bottom ≤ mints`, window = 600, `0 < tolerance < 0.5` | H |
 | `feed.decode.sample_errors` | frames | 5 | 0–100 | H |
 | `feed.metadata.name_bytes` / `symbol_bytes` | bytes | 32 / 10 | 8–64, symbol ≤ name | B |
+| `feed.secondary.enabled` / `provider` / `commitment` | bool / enum / enum | false / — / confirmed | provider named only when enabled; commitment stated because it changes latency | B |
+| `feed.secondary.endpoint` / `token` | secret url / secret | — | `https`/`grpcs`, host allowlist; env-only | B |
+| `feed.secondary.filters` / `startup_check_s` | count / s | 256 / 10 | provider limit measured in C14; first frame within the budget | H |
+| `feed.failover.prefer` / `switch_after_s` / `switch_back_after_s` / `secondary_fresh_s` | enum / s / s / s | primary / 30 / 300 / 10 | targets, outage threshold, five minutes of health, a standby with no event is not fresh (`failover.md` §3) | H |
+| `feed.failover.compare_window_s` / `max_switches_1h` / `flap_cooldown_s` / `footer_window_s` / `warm_standby` / `require_secondary` | s / count / s / s / bool / bool | 600 / 3 / 3600 / 600 / true / false | aligned comparison, flap guard, card stamp, hot rings, explicit requirement | H |
+| `capture.enabled` / `dir` / `retention_days` / `max_bytes` | bool / path / days / bytes | true / `data/capture` / 14 / 2 GiB | evidence path; inside data dir; two weeks; ~1.2 GiB expected | B |
+| `capture.queue_capacity` / `flush_ms` / `manifest_sync_ms` / `compression` / `sources` | records / ms / ms / enum / enum | 4096 / 1000 / 60000 / `zstd-3` / `primary` | bounded tap; crash bound; metadata; ratio; `both` from M6 only | B |
+| `backtest.report_min_days` / `min_candidates` / `train_share` / `max_sweeps` | days / count / frac / count | 7 / 30 / 0.7 / 20 | below these a report says insufficient evidence; sweep budget | B |
+| `backtest.forward_mark_5m_s` / `_1h_s` / `report_sha256_required` | s / s / bool | 300 / 3600 / true | outcome proxy horizons; a report without a hash cannot justify a key | B |
 | `gate.launch_window_s` | s | 10 | 5–30, equals `bundle.window_ms/1000` | H |
 | `gate.launch_slots` / `max_subs` / `launch_slot_wait_s` | count / count / s | 4 / 20 / 2 | `launch_slots < max_subs`, max 4–64 | H |
 | `gate.retain_ttl_s` / `retain_window_s` / `retain_min_sol` / `keepalive_sol_60s` / `evict_margin` | s / s / SOL / SOL / × | 1800 / 300 / 3.0 / 0.5 / 1.5 | ttl 300–7200, window ≤ ttl, ≥0, ≥0, ≥1.0 | H |
@@ -160,6 +183,8 @@ boot-only, `H` = hot. Secrets are always `B` and are env-only.
 | `rank.job_cron` / `rank.store_dir` / `rank.job_cache_dir` | cron / path / path | Mon 00:00 UTC / `data/rank` / `data/rank/jobs` | parses; inside data dir; writable | B |
 | `wallet.chunk_keys` / `position_memory_ms` / `touched_cap` / `min_buy_sol` | keys / ms / entries / SOL | 100 / 86400000 / 100000 / 0.25 | 1–100, cap ≥10000; pacing uses `deliver.wallets.cooldown_ms`, one knob | H |
 | `wallet.add_alert` | bool | false | watch-set additions post nothing; the discovery set grows silently | H |
+| `wallet.exit_share_bp` / `exit_dust_bp` / `min_exit_sol` / `exit_require_entry` | bp / bp / SOL / bool | 9000 / 500 / 1.0 / true | 90% of peak sold is an exit; 5% remaining is closed; dust proceeds are not information; pairing keeps the basis honest (`ranking.md` §9) | H |
+| `deliver.wallets.exit_hourly` | posts/h | 3 | shares the 6/h wallet bucket; exits cannot take more than half of it | H |
 | `deliver.{volume,wallets,cto}.webhook_url` | secret url | — | `https://discord.com/api/webhooks/{id}/{token}` | B |
 | `deliver.staging.{volume,wallets,cto}.webhook_url` | secret url | — | same shape, different id from production | B |
 | `deliver.{volume,wallets,cto}.channel_id` | id | — | boot-only; required when `deliver.readback.enabled` | B |
@@ -204,7 +229,10 @@ Groups: `feed`/`gate` transport and subscriptions; `registry` lifecycle; `volume
  "process":{"pid":4812,"boot_id":"3f9c…","started_at":"…Z","uptime_s":3612.4,"version":"0.1.0","config_hash":"9f2c…",
   "restart_generation":3,"state":"amber","red_reasons":[],"dry":false,
   "tasks":[{"stage":"feed.session","state":"running","restarts":1,"last_exit":null}]},
- "feed":{"state":"connected","mode":"single-source","unverified":true,"generation":41,"sockets_open":1,"session_uptime_s":3402.1,
+ "feed":{"state":"connected","mode":"single-source","authoritative":"primary","unverified":true,"generation":41,
+  "sockets_open":{"primary":1,"secondary":0},"sockets_open_total":1,
+  "source_state":{"primary":"connected","secondary":"unavailable"},"switches_total":0,"last_switch_ms":null,"switch_reason":null,
+  "boundary_frames_dropped":0,"failover_cold_rings_total":0,"switch_back_blocked_total":{"unhealthy":0,"stale":0,"disagree":0,"flap":0},"session_uptime_s":3402.1,
   "create_age_s":3.2,"trade_age_s":0.4,"watchdog_threshold_s":31.6,"msgs_per_s_ewma":0.94,"frames_dropped":0,
   "stale_generation_dropped":17,"dup_dropped":0,"dedup_entries":214553,"decode_errors_total":0,"field_missing_total":0,
   "reconnects_total":1,"watchdog_false_positives":0,"ban_active":false,"banned_until":null,"gap_heals_ok":1,
@@ -222,8 +250,14 @@ Groups: `feed`/`gate` transport and subscriptions; `registry` lifecycle; `volume
   "primed_from_empty":0,"new_claims":2,"posted":2},
  "rank":{"coverage_bp":9930,"max_gap_ms":420000,"segments_bytes":124000000,"rows":590000,"writer_lag_ms":140,
   "watchset":{"state":"ok","generation":42,"age_s":259200,"sha256":"ab12…"},"watchset_refused_coverage":0,
-  "venue":{"curve":8120000,"pumpswap":0,"raydium":0,"unknown":0},"post_migration":"unverified"},
- "wallet":{"state":"normal","keys_subscribed":40,"entered_total":0,"add_suppressed":0,"sells_seen":0,"cold_events":0,"wallet_budget_suppressed":96},
+  "venue":{"curve":8120000,"pumpswap":0,"raydium":0,"unknown":0},"post_migration":"unverified",
+  "sources_used":["pumpportal"],"switches":0},
+ "wallet":{"state":"normal","keys_subscribed":40,"entered_total":0,"add_suppressed":0,"sells_seen":0,"cold_events":0,
+  "wallet_budget_suppressed":96,"exits_total":0,"exit_suppressed":{"cap":0,"budget":0,"unpaired":0,"transfer":0,"unverified":0},
+  "exit_basis":{"balance":0,"sizes":0,"unknown":0},"exit_cold_on_restart":0,"positions_open":0,"positions_closed":0},
+ "capture":{"state":"writing","bytes_today":74200000,"bytes_total":412000000,"segments":14,"oldest_day":"2026-10-18",
+  "frames_written":4120000,"dropped_frames":0,"drop_intervals":0,"truncated_segments":0,"coverage_bp_24h":9998},
+ "backtest":{"last_report_ms":null,"last_report_sha256":null,"last_result":"none","fitted_keys":0,"in_sample_reports":0},
  "delivery":{"started_at":"…Z","restart_generation":3,"readback":"off","webhooks":{"volume":{"state":"closed","last_ok_age_s":14,
   "posts_1h":3,"edits_1h":1,"daily_used":3,"tokens":2.4,"hold_depth":2,"queue_depth":0},"wallets":{"state":"closed"},"cto":{"state":"closed"}},
   "counters":{"posts_sent":41,"delivery_unknown":0,"drop_dedup":6,"drop_cooldown":11,"escalation_without_target":1,"outage_cards_posted":1}},
@@ -234,7 +268,9 @@ Groups: `feed`/`gate` transport and subscriptions; `registry` lifecycle; `volume
 
 Enums: `volume.state=normal|warming|slow`; `watchset.state=ok|missing|corrupt|incompatible|stale|cfg_mismatch`;
 `post_migration=ok|gap|unverified`; webhook `state=closed|open|half_open`; `disk_state=ok|low|full`;
-`sockets_open` is 0 or 1. `by_state.near_graduation` is display-only; `age_s` is wall age.
+`feed.authoritative=primary|secondary|none`; `capture.state=off|writing|stopped_disk|stopped_cap|error`.
+`sockets_open{provider}` is 0 or 1 each and the total is at most 2. `by_state.near_graduation` is
+display-only; `age_s` is wall age.
 
 **Satisfying the SCOPE §4 latency claims.** `feed_lag`, `decode_us`, `detect_us`, `enqueue_us`,
 `budget_wait_ms`, `hold_wait_ms`, `http_us` and `total_ms` are exported at p50/p99/p999 with `n`
@@ -314,8 +350,8 @@ family. Prefer a stage restart or a hot config change; restart only when the tab
 
 | # | Procedure | Detection signal | First action | Safe to restart | Must not do |
 |---|---|---|---|---|---|
-| 1 | Feed down | `feed.state` `reconnecting` > 2 min, `reconnects_total` rising, `create_age_s` > T | Read `feed.state`, `banned_until`, last error class; confirm the vendor is reachable from the host with one request; leave config alone | Process yes (cold rings, ids lost); session alone yes via its supervisor; never open a second connection | Raise the restart budget, lower the watchdog floor, run a second socket or a parallel probe client, or call the market quiet |
-| 2 | Ban | `feed.state=banned`, `banned_until` in the future, three short sessions or a vendor limit | Do nothing until expiry; verify `sockets_open ≤ 1` and that the key wallet holds ≥0.02 SOL; after expiry one attempt is automatic | No. A restart does not clear a provider ban and may extend it; it also consumes attempts | Retry early, rotate keys or IPs to evade, run diagnostics that open sockets, delete the ban state |
+| 1 | Feed down | `feed.state` `reconnecting` > 2 min, `reconnects_total` rising, `create_age_s` > T | Read `feed.state`, `banned_until`, last error class; confirm the vendor is reachable from the host with one request; leave config alone | Process yes (cold rings, ids lost); session alone yes via its supervisor; never open a second connection to the same provider | Raise the restart budget, lower the watchdog floor, run a second socket to one provider or a parallel probe client, or call the market quiet |
+| 2 | Ban | `feed.state=banned`, `banned_until` in the future, three short sessions or a vendor limit | Do nothing until expiry; verify `sockets_open[provider] ≤ 1` and that the key wallet holds ≥0.02 SOL; after expiry one attempt is automatic | No. A restart does not clear a provider ban and may extend it; it also consumes attempts | Retry early, rotate keys or IPs to evade, run diagnostics that open sockets, delete the ban state |
 | 3 | CTO source failing | `cto.state=degraded`, `polls_failed`, `empty_streak ≥ 6` | One manual GET of the vendor list; check host clock; other families keep posting | `cto.poll` yes; process yes (high-water survives) | Treat an empty list as a quiet market, replay the list, drop the high-water, or shorten the poll below the vendor limit |
 | 4 | RPC 429 storm | `ops.rpc.http_429_total` rising, `consecutive_failures > 0`, unhealed gaps rising | Check provider tier and credits; hot-reduce `feed.heal.calls_per_min` and `bundle.rpc_calls_per_sec`; expect declared-unhealed and say so | No need; process restart only drops the cache and changes nothing upstream | Retry immediately, silently disable heal, or add a second provider without writing its failure mode first |
 | 5 | Discord breaker open | `delivery.webhooks.*.state=open`, `webhook_dead`/`webhook_forbidden`, `status_no_route` | Classify from the last error (401/50027, 403, 404/10015, 5xx); verify the webhook still exists and has permission; rotate the URL if dead | Process yes (breaker and ids reset); never restart only the sender to "clear" a dead URL | Retry invalid requests, open the breaker on 429 or 400/50035, or recreate the channel as a first response |
@@ -324,18 +360,21 @@ family. Prefer a stage restart or a hot config change; restart only when the tab
 | 8 | Disk full | `ops.disk_state=low\|full`, `record_write_errors`, rank writer errors, health amber | Stop non-essential writes; prune whole old segments and quarantined files; check caps and inodes | Writers yes once free space exists; process yes | Delete the current rank segment, current launch segment, `cto_state.json` or the watch set; disable fsync; run without caps |
 | 9 | Process crash loop | systemd `NRestarts` rising, repeated boot lines, `restart_generation` climbing | Read the one ERROR panic line and the config hash it booted with; reproduce with `--dry` and `--startup-check` off the live path; fix the config or binary | Process yes after the fix; not before | Clear the systemd start limit repeatedly, run blind with no dead-man's switch, or let the boot line imply a healthy baseline |
 | 10 | Vendor schema drift | `decode_errors_total` or `field_missing_total` rising with no deploy; unknown-type samples | Read the first redacted samples, compare with the pinned fixture, pin the new shape in a test before shipping; mark the feed degraded if errors exceed 5% | Process yes, but it re-alerts and does not fix a schema | Patch the decoder in production without a fixture, retry the same bytes, or ignore unknown fields silently |
+| 11 | Failover flapping | `switches_total` rising, `flap_guard > 0`, `last_switch_ms` recent, both providers oscillating | Read `source_state` and `switch_reason`; fix the sick provider or pin `feed.failover.prefer`; the guard already holds the current authority for an hour | Process yes (resets the switch count and colds the standby); prefer a provider fix | Raise `max_switches_1h`, disable the flap guard, force a source without recording it, or open a second socket to one provider |
+| 12 | Capture stopped | `capture.state=stopped_disk\|stopped_cap`, `dropped_frames > 0`, disk `low` | Free space, prune whole old capture days, check `capture.max_bytes`; the alert path is unaffected | Capture writer yes; process only if it is also out of disk | Delete the current capture segment, merge two days, or read a capture file on the alert path |
 
 ## 7. Deployment
 
 | Variable | Meaning |
 |---|---|
 | `OCW_ENV` / `OCW_CONFIG` / `OCW_DATA_DIR` / `OCW_LOG` | `production\|staging` (production refuses unset) / config path / state root / `<level>,<json\|text>` |
-| `OCW_PUMPPORTAL_KEY`, `OCW_RPC_URL`, `OCW_HEALTH_TOKEN`, `OCW_DEADMAN_URL`, `OCW_DISCORD_{VOLUME,WALLETS,CTO}_URL` | credentials and secrets, env-only |
+| `OCW_PUMPPORTAL_KEY`, `OCW_RPC_URL`, `OCW_HEALTH_TOKEN`, `OCW_DEADMAN_URL`, `OCW_DISCORD_{VOLUME,WALLETS,CTO}_URL`, `OCW_GEYSER_ENDPOINT`, `OCW_GEYSER_TOKEN` | credentials and secrets, env-only |
 | `RUST_BACKTRACE` | `1` in production; panic lines reach journald |
 
 Precedence CLI > env > file; secrets env-only. Layout: `/usr/local/bin/ocw` → `/usr/local/lib/ocw/
-releases/<sha>/ocw`; `/etc/ocw/config.toml`; `/etc/ocw/ocw.env` (0600); `/var/lib/ocw/{rank,launch,
-rank/jobs}`, `cto_state.json`, `watchset-GGGGGG.json`, `exclusions.toml`. Logs go to journald.
+releases/<sha>/ocw`; `/etc/ocw/config.toml`; `/etc/ocw/ocw.env` (0600);
+`/var/lib/ocw/{rank,launch,rank/jobs,capture}`, `cto_state.json`, `watchset-GGGGGG.json`,
+`exclusions.toml`. Logs go to journald.
 
 ```ini
 [Unit]
@@ -351,13 +390,16 @@ TimeoutStopSec=20
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/ocw
-MemoryMax=384M
+MemoryMax=512M
 ```
 
 Assumptions: 0.23 launches/s, 1500 msg/s peak, 20 subscriptions, 10k live mints. RSS ≈ 120 MB
-(registry 27, dedup 15, rank index 14, bundle cache 5, queues and code the rest), `MemoryMax` 384 MB.
-CPU < 0.5 core average, ~1 at peak; inbound ~0.6 MB/s; Discord negligible. Disk caps 512 MiB rank +
-1 GiB launch = 1.6 GiB, 2 GiB free floor. All PRIOR until M1 measures.
+single-source (registry 27, dedup 15, rank index 14, bundle cache 5, queues and code the rest);
+with the M6 standby pipeline add ~27 MB registry, ~15 MB dedup, ~13 MB rings and ~5 MB decode
+buffers, so ~180 MB and `MemoryMax` 512 MB from M6. CPU < 0.5 core average, ~1 at peak, ~2 cores
+worst case with two sources; inbound ~0.6 MB/s per source; Discord negligible. Disk caps 512 MiB
+rank + 1 GiB launch + 2 GiB capture = 3.6 GiB; keep the 2 GiB free floor above them. All PRIOR until
+M1 measures.
 
 Upgrade: build; `--dry` and `--startup-check --staging`; `systemctl stop` (flush); repoint the
 symlink; start; verify boot line, `/health`, one heartbeat. Rollback: repoint and start; no alert
@@ -370,7 +412,7 @@ Run against staging webhooks and a recorded fixture; state rate and window besid
 
 1. Fixture: every captured frame decodes as pinned; a renamed field fails; unknown fields tolerated and counted. Pass: 100%.
 2. Rate: one hour against a simultaneous reference (client messages; RPC signatures for five mints). Pass: events/min ±5%.
-3. Disconnects: 10 forced closes, 45 s each. Pass: 10 reconnects, 10 outage identities, `sockets_open` never >1, 0 duplicates after replay.
+3. Disconnects: 10 forced closes, 45 s each. Pass: 10 reconnects, 10 outage identities, `sockets_open[provider]` never >1, 0 duplicates after replay.
 4. Replay: a 10-minute capture three times. Pass: 0 accepted after pass one, `dup_dropped = 2 × accepted`, ring totals unchanged.
 5. Soak 24 h: `watchdog_false_positives ≤ 2`; every watchdog reconnect heals >0 or is counted; no reconnect while the probe says quiet.
 6. Gate 24 h at 0.5 creates/s: `subs_live == subs_desired ≤ max_subs`; no entry older than TTL + 2 reconcilers; `unsub_failed = 0`; every refusal counted.
@@ -382,6 +424,7 @@ Run against staging webhooks and a recorded fixture; state rate and window besid
 12. Fuzz: 1M mutated frames. Pass: no panic, RSS bounded, exact decode-error count, no byte retried.
 13. Cost: `msgs_charged_total/10_000 × 0.01 = sol_spent_today` ±0.1%; projection ±20% of the next hour.
 14. Ops: `--startup-check --staging` proves POST, PATCH and permission on all three; `--dry` prints valid payloads; a revoked token exits 3 naming the key, not the URL.
+15. Capture: one hour recorded across a forced 10-minute disconnect. Pass: frames round-trip byte-identically, the manifest gap matches the disconnect within 1 s, a ±5 s wall-clock step reorders nothing, and a queue saturation for 60 s writes an exact drop count without changing `frames_dropped`.
 
 ## 9. Three reliability improvements, with cost
 
@@ -390,6 +433,7 @@ Run against staging webhooks and a recorded fixture; state rate and window besid
 | Shadow verifier moved from M2b to M1 as a 20-mint RPC sample per 10 min | Turns `unverified` into a measured p50/p90 and makes a quiet-market claim possible on samples | ~2,900 RPC calls/day, one sampling job, ~3 days build; still cannot prove per-trade completeness |
 | Bot-token readback for status and heartbeat only | One outage card per channel across restarts; heartbeat edits survive a restart; no duplicate CTO card | Second credential, Read Message History + Manage Messages in three channels, one `GET` of 100 messages at boot, a wider redaction surface |
 | RAM-only 15-minute frame ring (signature hash + length, no payload) | Post-incident estimate of messages lost between heartbeats, still nothing on disk and off the alert path | ~40 MB RAM, a privacy decision, and a new bounded-ring code path that must never feed a detector |
+| Warm-standby second provider (M6) | Removes the single-provider outage for volume and wallets; a switch keeps warm rings and loses seconds, not four minutes | A paid provider, own decode, ~2× pipeline CPU, ~60 MB RAM, two feeds to monitor, and a copyleft dependency gate (`failover.md` §13–14) |
 
 ## 10. Open questions
 

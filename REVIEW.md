@@ -1,6 +1,10 @@
 # Review — onchain-crime-watcher scope
 
-Date: 2026-10-25. Read-only review of `SCOPE.md` and `README.md` by five reviewers with separate
+Date: 2026-10-25. **Historical: this review evaluates revision 4.** Revision 5 of
+[`SCOPE.md`](SCOPE.md) adds capture and replay backtesting, hot failover between providers, and
+wallet exit alerts, so its "no hot failover" and "no backtest harness" statements describe the
+scope at review time, not the current contract. Read-only review of `SCOPE.md` and `README.md` by
+five reviewers with separate
 lenses: statistical accuracy, Discord delivery, pipeline architecture, Rust latency, and data-source
 provenance. This file consolidates their findings, collapses overlaps, and records where they
 disagreed. Nothing here changes the contract until SCOPE.md is revised.

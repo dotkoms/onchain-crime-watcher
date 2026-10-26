@@ -15,7 +15,7 @@ struct Bucket {                 // one completed 15 s bucket
     top_taker_lamports: u64,    // largest per-taker contribution (upper bound, below)
     trades: u32,
     distinct_takers: u16,       // saturates at the slot count
-    flags: u8,                  // PARTIAL_TRUNCATED | HEALED_UNVERIFIED
+    flags: u8,                  // PARTIAL_TRUNCATED | HEALED_UNVERIFIED | SOURCE_SECONDARY
     _pad: u8,
 }                               // 24 B
 struct TakerSlot { key: u64, vol_lamports: u64 }   // 16 B
@@ -50,6 +50,12 @@ struct VolumeState {
 PRIOR 32 taker slots: 5 distinct is the requirement; 32 satisfies it for 512 B. Beyond 32 the table becomes a bounded heavy-hitter summary and the top-taker figure an upper bound, which makes the gate stricter, never looser.
 
 `partial.idx == completed`; the ring covers `[completed−30, completed−1]`, saturating at the start. Bucket zero is anchored at the create event, not at admission: `anchor_t0` is the create's `recv_mono`, and `admit_bucket_offset = ceil((admit_mono − anchor_t0) / 15 s)` is the first full bucket volume can observe. A trade maps to global `g = floor((recv_mono − anchor_t0) / 15 s)` and is stored at `idx = g − admit_bucket_offset`, so the first observed bucket is `idx = 0` and its deadline is `anchor_t0 + (admit_bucket_offset + 1) × Δ`; the remainder of the admission bucket is unobserved and is never counted as zero volume. The partial is frozen at close, evaluated, inserted, and never read by a baseline. Taker key is the first 8 bytes of `traderPublicKey` (PRIOR: 8 bytes is enough; random keys make collision risk at 32 entries negligible); insert sums `sol_lamports`; when full, replace the minimum slot and set `overflow`. Top share is `max(max_slot, min_slot) / vol` when overflowed, exact otherwise.
+
+**Source tag.** `SOURCE_SECONDARY` marks a bucket built from the secondary provider (M6). A bucket
+never spans sources: on switchover the outgoing partial is dropped (`failover.md` §4), so the flag is
+constant within a bucket by construction. The flag exists because the invariant must be testable
+and because a card may say which source produced a statistic; the detector itself never branches on
+it.
 
 ## 2. Update order
 

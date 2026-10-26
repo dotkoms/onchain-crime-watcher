@@ -11,7 +11,7 @@ Tags: `[doc]` documented, `[obs]` observed on staging, `[folk]` community-report
 detect ──Alert──▶ per-webhook Scheduler
    ├─ admission: dedup → cooldown → budget → priority → hold
    ├─ render + validator (sanitize, truncate, count chars)
-   ├─ id store (RAM, keyed (webhook, mint, family))
+   ├─ id store (RAM, keyed (webhook, mint, family, kind for wallets))
    ├─ sender: one task, one serialized queue, posts and edits
    └─ buckets, breaker, 429 pause, health counters
                    ▼  POST ?wait=true  ·  PATCH /webhooks/{id}/{token}/messages/{mid}
@@ -28,25 +28,33 @@ pub enum WebhookId { Volume, Wallet, Cto }
 pub enum Tier { Near, Fire, Cleared }        // bundle 60/80/95; volume uses Near/Fire
 pub enum Target { NewPost, Edit(u64), Escalate }
 pub enum CandState { Held, Admitted, InFlight, Done, Dropped(DropReason) }
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)] pub enum Priority { Status = 0, CtoListing = 1, WalletEntry = 2, BundleEdit = 3, VolumeFire = 4, VolumeNear = 5 }
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)] pub enum Priority { Status = 0, CtoListing = 1, WalletExit = 2, WalletEntry = 3, BundleEdit = 4, VolumeFire = 5, VolumeNear = 6 }
+pub enum WalletKind { Entry, Exit }
 pub struct Alert {
     pub id: u64, pub family: Family, pub priority: Priority, pub mint: Mint,
     pub symbol: String, pub name: String,        // attacker-controlled; sanitized at render
-    pub key: AlertKey, pub cooldown: CooldownKey, pub detected_at: Instant,
+    pub key: AlertKey, pub cooldown: Option<CooldownKey>, pub detected_at: Instant,
     pub body: AlertBody, pub card_state: CardState, pub target: Target,
 }
 pub enum AlertBody {                            // numbers only; strings resolved at the card
     Volume { ratio: f32, sol: f64, baseline_sol: f64, mad_sol: f64, takers: u16,
              top_taker_share: f32, nonempty_buckets: u8, regime: Regime, usd_rate_age_ms: u64 },
-    Wallet { wallet: [u8; 32], size_sol: f64, share_of_launch: Option<f32>,
-             rank: Option<RankQuote>, first_seen_ms: i64, new_for_wallet: bool },
+    Wallet { kind: WalletKind, wallet: [u8; 32], size_sol: f64, share_of_launch: Option<f32>,
+             rank: Option<RankQuote>, first_seen_ms: i64, new_for_wallet: bool,
+             exit: Option<ExitView> },
     Cto { claim_date: i64, bundle: BundleView, price: PriceContext, non_pumpfun: bool },
 }
+pub struct ExitView {                          // present iff kind == Exit
+    pub sold_share: f32, pub proceeds_sol: f64, pub realised_sol: Option<f64>,
+    pub closed: bool, pub hold_ms: i64, pub entry_price: Option<f64>, pub exit_price: f64,
+    pub basis: ExitBasis, pub transfer_out: bool, pub entry_alerted_ms: Option<i64>,
+}
+pub enum ExitBasis { Balance, SellSizes, Unknown }
 pub struct Candidate { pub alert: Alert, pub seq: u64, pub enqueued_at: Instant, pub deadline: Instant, pub state: CandState }
-pub enum DropReason { Dedup, Cooldown, DailyCap, HourlyCap, NearCap, NearReserve, HoldExpired, BudgetWaitExpired, Overflow, NoChange, WebhookDead, Shutdown }
+pub enum DropReason { Dedup, Cooldown, DailyCap, HourlyCap, NearCap, NearReserve, ExitCap, HoldExpired, BudgetWaitExpired, Overflow, NoChange, WebhookDead, Shutdown }
 pub struct MessageRef { pub webhook: WebhookId, pub message_id: u64, pub channel_id: u64,
-    pub family: Family, pub mint: Mint, pub tier: Tier, pub card_state: CardState,
-    pub marker: String, pub posted_at: Instant,  // "ocw:v1:<mint8>:<family>" in the footer
+    pub family: Family, pub kind: Option<WalletKind>, pub mint: Mint, pub tier: Tier, pub card_state: CardState,
+    pub marker: String, pub posted_at: Instant,  // "ocw:v1:<mint8>:<family>[:<kind>]" in the footer
     pub last_edit_at: Option<Instant>, pub pending: Option<(Tier, CardState, Instant)> }
 pub struct Scheduler {
     pub id: WebhookId, pub bucket: TokenBucket,  // capacity 2–3, refill hourly_cap/3600 per s
@@ -65,12 +73,14 @@ pub struct DeliveryState {
 ```
 
 `Priority` derives `Ord` with `Status` lowest, and the hold is a **min-heap**
-(`BinaryHeap<Reverse<Candidate>>`), so selection pops `Status` first, then CTO, wallet, bundle,
-fire, near. Within a tier `seq` is FIFO; `WalletEntry` orders ties by rank PnL desc, then buy size
-desc, then `seq`. The comparison is stated once here so an implementation cannot invert it.
-Delivery owns every message id; detectors keep tiers only, never ids. The upstream values behind
-`sol` and `size_sol` are `sol_lamports` with `sol_source = Payload | ReserveDelta` (`feed.md` §2);
-no card or admission path reads raw `solAmount`.
+(`BinaryHeap<Reverse<Candidate>>`), so selection pops `Status` first, then CTO, wallet exit,
+wallet entry, bundle, fire, near. Within a tier `seq` is FIFO; `WalletExit` orders ties by rank PnL
+desc, then sold share desc, then `seq`; `WalletEntry` by rank PnL desc, then buy size desc, then
+`seq`. The comparison is stated once here so an implementation cannot invert it. Delivery owns
+every message id; detectors keep tiers only, never ids. A wallet message id is keyed with the kind,
+because one mint can carry both an entry and an exit card. The upstream values behind `sol` and
+`size_sol` are `sol_lamports` with `sol_source = Payload | ReserveDelta | Instruction` (`feed.md`
+§2); no card or admission path reads raw `solAmount`.
 
 ## 3. Admission algorithm
 
@@ -78,13 +88,15 @@ Per webhook, on enqueue and every 250 ms, in this order. Drops precede tokens, s
 costs budget.
 
 1. Ingest: assign `seq`. `VolumeNear` and `WalletEntry` take
-   `deadline = detected_at + deliver.hold.window_ms` (45 s); `VolumeFire`, `CtoListing` and
-   `BundleEdit` take `deadline = detected_at + deliver.budget_wait_max_ms` (600 s). `Status` has
-   no hold deadline.
+   `deadline = detected_at + deliver.hold.window_ms` (45 s); `VolumeFire`, `CtoListing`,
+   `WalletExit` and `BundleEdit` take `deadline = detected_at + deliver.budget_wait_max_ms`
+   (600 s). `Status` has no hold deadline.
 2. **Dedup.** Key `Queued|InFlight|Sent` → drop `Dedup`; key `Unknown` (ambiguous POST) → drop,
    `drop_ambiguous_replay++`; absent → insert `Queued`.
-3. **Cooldown.** Inside TTL → drop `Cooldown`; a tier escalation with a live `MessageRef` is exempt
-   and becomes an edit (§5).
+3. **Cooldown.** Exits carry no cooldown (`alert.cooldown = None`): one exit per episode is already
+   enforced by its dedup key, and the entry cooldown must not swallow the exit. For entries, inside
+   TTL → drop `Cooldown`; a tier escalation with a live `MessageRef` is exempt and becomes an edit
+   (§5).
 4. **Status.** Skips 5–9 and the near sub-cap, uses the status lane, `status_bypass++`; still obeys
    429 and the breaker. Status and heartbeat edits consume no alert token, hourly slot, daily slot
    or near sub-cap.
@@ -94,32 +106,38 @@ costs budget.
    `near_posts_today ≥ ceil(0.30 · daily_cap)` → `NearCap`, counted `drop_near_cap` with the
    window in the log; step 9 still applies.
 8. **Selection.** Admit the **minimum** of `(Priority, seq)` —
-   `Status < CtoListing < WalletEntry < BundleEdit < VolumeFire < VolumeNear` — when a token
-   exists; `Status` waits only for its own lane. The hold is a min-heap, never a max-heap.
-   `WalletEntry` ties order by rank PnL desc, then buy size desc, then `seq`.
+   `Status < CtoListing < WalletExit < WalletEntry < BundleEdit < VolumeFire < VolumeNear` — when
+   a token exists; `Status` waits only for its own lane. The hold is a min-heap, never a max-heap.
+   `WalletExit` ties order by rank PnL desc, then sold share desc, then `seq`; `WalletEntry` ties
+   order by rank PnL desc, then buy size desc, then `seq`.
 9. **Fire reservation, both counters.** Hourly: `reserve = max(0, fire_reserve_per_hour −
    fire_posts_1h)`, `non_fire = tokens − reserve`: near needs `non_fire ≥ 1.0`. Daily:
    `reserve_day = max(0, fire_reserve_per_hour · daily_cap / hourly_cap − fire_posts_today)`;
    near needs `daily_remaining − reserve_day ≥ 1` (`daily_remaining = daily_cap − posts_today`),
    else `NearReserve`, counted `drop_near_reserve`. Fire, CTO, wallet and bundle may take any token
    and the reserved daily slot. Recomputed each tick.
-10. **Burst and grant.** Capacity 3 (volume) / 2 (wallets, CTO) spendable at once; refill
+10. **Exit sub-cap.** `exit_posts_1h ≥ deliver.wallets.exit_hourly` (3) → `ExitCap`, counted
+    `wallet_exit_suppressed{cap}`. Exits still share the wallet hourly and daily caps; the sub-cap
+    only stops them from taking every token. Entries are never refused in order to save a token for
+    an exit that may never come.
+11. **Burst and grant.** Capacity 3 (volume) / 2 (wallets, CTO) spendable at once; refill
     `hourly_cap / 3600` per s. On grant take the token, increment hourly and daily, set dedup
     `InFlight` *before* the HTTP call — that flag makes an ambiguous POST non-retryable. Status
     and heartbeat edits increment neither window.
-11. **Deadline expiry.** `VolumeNear` and `WalletEntry`: `now > deadline` → `HoldExpired`
-    (`drop_hold_expired`), near then wallet first, never extended. `VolumeFire`, `CtoListing` and
-    `BundleEdit`: they wait for budget only until `now > deadline` → `BudgetWaitExpired`
-    (`drop_budget_wait_expired`), never extended; shutdown drops leftovers as `drop_shutdown`.
-    `Status` is never expired.
-12. **Overflow.** `hold + ready > 256` → drop lowest priority, highest `seq`; status never dropped.
+12. **Deadline expiry.** `VolumeNear` and `WalletEntry`: `now > deadline` → `HoldExpired`
+    (`drop_hold_expired`), near then wallet first, never extended. `VolumeFire`, `CtoListing`,
+    `WalletExit` and `BundleEdit`: they wait for budget only until `now > deadline` →
+    `BudgetWaitExpired` (`drop_budget_wait_expired`), never extended; shutdown drops leftovers as
+    `drop_shutdown`. `Status` is never expired.
+13. **Overflow.** `hold + ready > 256` → drop lowest priority, highest `seq`; status never dropped.
 
 Priority orders admission and survival; it never changes a cap. Only `Status` bypasses, only on its
 own lane.
 
 **Watch-set expectation.** The ~40-wallet watch set is a discovery set, not a delivery promise:
-~120 candidates/day against the 20/day cap means ~83% are suppressed by budget and counted
-`wallet_budget_suppressed` — the Wallet-family daily and hourly cap drops.
+~120 entry candidates/day plus exits on observed positions, ~240 against the 20/day cap, so roughly
+92% are suppressed by budget and counted `wallet_budget_suppressed` — the Wallet-family daily and
+hourly cap drops.
 
 ## 4. Dedup and cooldown are separate structures
 
@@ -132,18 +150,21 @@ Dedup asks *have I already acted on this exact event*; cooldown asks *is a new e
 | State, on hit | RAM only; drop, no budget consumed | RAM only; drop, counted |
 
 ```rust
-pub struct AlertKey { pub mint: Mint, pub family: Family, pub window: u64 }
-// window: volume = bucket_close_unix / 15 · wallet = first_seen_ms
+pub struct AlertKey { pub mint: Mint, pub family: Family, pub kind: Option<WalletKind>, pub window: u64 }
+// window: volume = bucket_close_unix / 15 · wallet entry or exit = episode_first_seen_ms
 //         cto = claim_date · bundle = tier as u64
 pub enum Signal { Volume, Cto, Bundle }
 pub enum CooldownKey { Mint { mint: Mint, signal: Signal },
-                       WalletMint { wallet: [u8; 32], mint: Mint } }
+                       WalletMint { wallet: [u8; 32], mint: Mint } }   // entries only
 ```
 
-**Wallet key correction.** Dedup is `(wallet, mint, first_seen)` — the receive time of the first buy
-after the wallet was flat on that mint. Without it, an exit and re-entry weeks later is dropped as a
-duplicate forever. Cooldown stays `(wallet, mint)`: two entries inside 3 h are one play developing.
-Dedup first. Both are LRU (4096 / 8192) by insert order; a restart may re-send, which is accepted.
+**Wallet key correction.** Dedup is `(wallet, mint, kind, episode_first_seen)`. The kind separates
+an entry and its exit on the same position, which share the episode start; the episode start
+separates a re-entry weeks later from the position it replaced. Without both, an exit is dropped as
+a duplicate of its own entry forever. Cooldown stays `(wallet, mint)` and applies to entries only:
+two entries inside 3 h are one play developing, while an exit is the resolution of the position the
+reader was already told about. Dedup first. Both are LRU (4096 / 8192) by insert order; a restart may
+re-send, which is accepted.
 
 ## 5. Message lifecycle
 
@@ -220,11 +241,12 @@ whole embed 2400.
 number with units. Then one signal per line. The mint sits on its own line in full (44 chars, never
 truncated). Links live in one field, not in prose. Footer: family, tier word, budget position,
 health, readback mode. **Colour is paired with a word** in title and footer: FIRE `0xED4245`, NEAR
-`0xFEE75C`, CLEARED `0x3BA55D`, STALE `0x95A5A6`, CTO `0xFEE75C`, ENTERED `0x3BA55D`,
-OUTAGE/RECOVERED `0xED4245`/`0x3BA55D`.
+`0xFEE75C`, CLEARED `0x3BA55D`, STALE `0x95A5A6`, CTO `0xFEE75C`, ENTERED `0x3BA55D`, EXITED
+`0xED4245`, OUTAGE/RECOVERED `0xED4245`/`0x3BA55D`.
 
 **Truncation priority** — cut from the bottom until it fits. Never cut: the mint, the tier word and decision number,
-the percentage or primary metric, bundle price context, the health footer. Then, first to last: why-it-fired
+the percentage or primary metric (including the exit sold share and realised SOL),
+bundle price context, the health footer. Then, first to last: why-it-fired
 diagnostics (last line first), coverage and cohort detail, chart links (dropped whole), name and symbol (falling back to
 the mint prefix), timestamps and rate age (logged as `truncated`).
 
@@ -235,7 +257,8 @@ never cut, embed under 2400 chars, non-empty title, mint matches the alert. Loca
 | Family | Title | Description lines | Fields |
 |---|---|---|---|
 | volume | `FIRE 3.7x \| SMPL` | decision, mint, why (ratio/MAD/takers/buckets), price + rate age, regime + coverage | `Chart` |
-| wallet | `ENTERED 4.2 SOL \| 9xQe` | decision, mint, wallet + rank, size + share, new-for-wallet, rank basis | `Chart` |
+| wallet entry | `ENTERED 4.2 SOL \| 9xQe` | decision, mint, wallet + rank, size + share, new-for-wallet, rank basis | `Chart` |
+| wallet exit | `EXITED 90% \| 9xQe` | decision, mint, wallet + rank, sold share + remaining, realised + basis, entry/exit price, hold time, pairing | `Chart` |
 | CTO + bundle | `CTO  FIRE 82% \| SMPL` | decision, mint, bundle arithmetic, price + dump word, basis, CTO wording | `CTO listing`, `Chart` |
 
 ```json
@@ -250,8 +273,16 @@ never cut, embed under 2400 chars, non-empty title, mint matches the alert. Loca
 {"username":"ocw","allowed_mentions":{"parse":[]},"embeds":[{
  "title":"ENTERED 4.2 SOL | 9xQe","color":3908957,"description":"**ENTERED — 4.2 SOL, new position on SMPL**\nMint: 7f3aQ9m2Kd4Vx1s8Rb6TpNyWc5HjLzUe3AoGvB2nMqSd\nWallet: 9xQeWvG816bUx9EPfN5nQhHk3pQyYbTgWz8r4mLc2VdA\nWallet rank: #7, week to 2026-10-19 · +41.3 SOL realised · 5 mints · 38.8 SOL deployed · fees estimated\nSize: 4.2 SOL = 6.9% of the 61 SOL bought in the first 90 s\nPrice: 0.00000041 SOL · quote 3 s old",
  "fields":[{"name":"Chart","value":"[DexScreener](https://dexscreener.com/solana/7f3aQ9m2Kd4Vx1s8Rb6TpNyWc5HjLzUe3AoGvB2nMqSd)","inline":false}],
- "footer":{"text":"wallets ENTERED · 2/20 today · watch set gen 4, 3 days old · buys only"},
+ "footer":{"text":"wallets ENTERED · 2/20 today · watch set gen 4, 3 days old · entries and exits"},
  "timestamp":"2026-10-25T17:14:02Z"}]}
+```
+
+```json
+{"username":"ocw","allowed_mentions":{"parse":[]},"embeds":[{
+ "title":"EXITED 90% | 9xQe","color":15548997,"description":"**EXITED — 90% of the position sold, 10% left**\nMint: 7f3aQ9m2Kd4Vx1s8Rb6TpNyWc5HjLzUe3AoGvB2nMqSd\nWallet: 9xQeWvG816bUx9EPfN5nQhHk3pQyYbTgWz8r4mLc2VdA\nWallet rank: #7, week to 2026-10-19 · +41.3 SOL realised · 5 mints · 38.8 SOL deployed · fees estimated\nSold: 90% of peak 30,000,000 · 4.02 SOL proceeds · realised +0.85 SOL · basis balance, fees estimated\nPrice: entry 0.000000117 SOL → exit 0.000000149 SOL (+27%) · held 42 min\nPaired: entry alerted 42 min ago · transfer out: none",
+ "fields":[{"name":"Chart","value":"[DexScreener](https://dexscreener.com/solana/7f3aQ9m2Kd4Vx1s8Rb6TpNyWc5HjLzUe3AoGvB2nMqSd)","inline":false}],
+ "footer":{"text":"wallets EXITED · 4/20 today · 1/3 exits this hour · watch set gen 4, 3 days old"},
+ "timestamp":"2026-10-25T17:56:02Z"}]}
 ```
 
 ```json
@@ -350,7 +381,8 @@ All under `deliver.`, durations suffixed, PRIOR numbers carry their reason in th
 | `deliver.{volume,wallets}.daily` / `deliver.cto.daily` | posts/day | 40 / 20 / 120 | first two binding (SCOPE §8); CTO PRIOR outer guard |
 | `deliver.{volume,wallets,cto}.bucket_capacity` | posts | 3 / 2 / 2 | cluster burst; 2 would drop a same-block pair |
 | `deliver.volume.fire_reserve_per_hour` / `deliver.volume.near_share_max` | posts/h / fraction | 2 / 0.30 | 20% held for fire; near capped at 30% (SCOPE §2A) |
-| `deliver.hold.window_ms` / `deliver.budget_wait_max_ms` | ms | 45000 / 600000 | hold is `VolumeNear` and `WalletEntry` only, inside 30–60 s; fire, CTO and bundle wait for budget up to 10 min or shutdown |
+| `deliver.hold.window_ms` / `deliver.budget_wait_max_ms` | ms | 45000 / 600000 | hold is `VolumeNear` and `WalletEntry` only, inside 30–60 s; fire, CTO, wallet exit and bundle wait for budget up to 10 min or shutdown |
+| `deliver.wallets.exit_hourly` | posts/h | 3 | exits share the 6/h wallet bucket but cannot take more than half of it; stops an exit storm crowding out entries |
 | `deliver.edit.min_interval_ms` / `deliver.edit.retry_max` | ms / attempts | 45000 / 3 | owner: delivery (bundle has no interval key); one edit per card per 45 s; PATCH is idempotent, 3 bounds a flapping edit |
 | `deliver.http.timeout_ms` | ms | 5000 | Discord p99 100–300 ms `[obs]`; 5 s bounds a hung socket |
 | `deliver.breaker.probe_ms` | ms | 60000 | half-open cadence |
@@ -384,7 +416,7 @@ daily and near sub-cap; the heartbeat interval is a delivery cadence, not an ale
   "drop_overflow":0,"drop_no_change":5,"drop_ambiguous_replay":0,
   "status_sent":2,"status_bypass":2,"status_no_route":0,"fallback_posts":0,"wait_ignored":0,
   "name_sanitized":1,"cooldown_lost_on_restart":0,"readback_found":0,"readback_missing":0,
-  "wallet_budget_suppressed":96,"suppressed_by_high_water":0,
+  "wallet_budget_suppressed":96,"wallet_exit_suppressed_cap":2,"wallet_exit_suppressed_budget":0,"suppressed_by_high_water":0,
   "outage_declined_blip":4,"outage_cards_posted":1},
  "blind_seconds_1h":{"trade_stream":0,"cto_source":0,"rpc":12,"discord:volume":0,"discord:wallets":0,"discord:cto":0}}}
 ```
@@ -410,6 +442,11 @@ Synthetic alerts, staging webhooks, assertions on counters and payloads.
 12. **Sanitization and truncation.** The §8 symbol renders inert with `name_sanitized = 1`; a 300-char name over a 900-char description drops the chart field, keeps mint and tier, stays under 2400 chars.
 13. **Outage.** 20 s blip: nothing. 40 s outage: one card, edited on recovery, bypasses a full budget, one per process.
 14. **Dry and startup.** `--dry` prints three valid payloads, exit 0; `--startup-check` proves POST, PATCH, DELETE; revoked token exits 3 naming the key, not the URL.
+15. **Exit after entry.** Entry posts at T; exit at T+30 min on the same position: 2 posts, no `drop_cooldown`; the exit's footer shows the exit sub-cap position.
+16. **Exit sub-cap.** Five exits and five entries in one hour with six tokens: 3 exits and 3 entries post; 2 exits are `wallet_exit_suppressed{cap}`; no entry is refused to reserve a token for an exit.
+17. **Exit deadline.** An exit queued with no free token waits past the 45 s hold and posts when a token frees inside 600 s; past 600 s it is `drop_budget_wait_expired`, never `drop_hold_expired`.
+18. **Key separation.** The same `(wallet, mint, episode_first_seen)` with kind entry and kind exit produces 2 posts; dedup does not collapse them, and the message-id store keeps both refs under different kinds.
+19. **Exit card truncation.** A 300-char token name over a 900-char description drops the chart and name before the sold share or realised SOL is cut; the card stays under 2400 chars.
 
 ## 14. Open questions
 
@@ -421,3 +458,6 @@ Synthetic alerts, staging webhooks, assertions on counters and payloads.
 6. **`retry_after` margin.** 0.25 s is a PRIOR. Measure 0, 0.25 and 0.5 s on staging; keep the smallest that never produces an immediate second 429.
 7. **Near presentation.** Recommendation: keep one template, put `near` in the footer; revisit contrast only after readers report confusion.
 8. **Staging fidelity.** Staging lives in another guild and another Cloudflare bucket. Recommendation: treat it as a payload/permission test, and measure real limits in a dedicated production channel before M2b.
+9. **Exit hold class.** Recommendation: an exit takes the 600 s budget-wait deadline, not the 45 s hold. An entry can be reordered; an exit on a position the reader was told about is time-sensitive, and the hold would only add a queue delay.
+10. **Exit sub-cap 3/h.** Recommendation: keep it and count `ExitCap`. Exits outrank entries, so without a sub-cap an exit storm can take the whole wallet channel; with it, the worst hour still leaves three tokens for entries.
+11. **Exit message-id key.** Recommendation: key wallet refs on `(webhook, mint, family, kind)` and footer markers with the kind; otherwise an exit PATCH can rewrite the entry card. The store grows by at most the number of positions, which is far below `deliver.ids.capacity`.

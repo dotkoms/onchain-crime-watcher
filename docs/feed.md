@@ -28,7 +28,8 @@ channels after detection are `snapshot`, `delta`, or `event` (`../SCOPE.md §5`)
 ```rust
 pub struct Generation(pub u64);   // +1 on every socket open
 pub struct SubGen(pub u64);       // +1 on every subscribe/unsubscribe per mint
-pub struct Frame { pub generation: Generation, pub recv: Instant, pub bytes: Bytes }
+pub enum Source { Primary, Secondary }   // one per session; never derived from the payload
+pub struct Frame { pub source: Source, pub generation: Generation, pub recv: Instant, pub bytes: Bytes }
 pub enum SocketCmd {
     Subscribe { mint: [u8;32], curve: [u8;32], sub: SubGen },
     Unsubscribe { mint: [u8;32], sub: SubGen }, Close,
@@ -77,8 +78,10 @@ No field owns heap memory and `size_of::<Trade>()` is pinned under 320 bytes. `s
 from `solAmount` if present, else the signed `vSolInBondingCurve` delta (`sol_source` records
 which). `solAmount` is observed in the working client's payloads but is not guaranteed by schema
 and must be treated as optional; when absent, derive the signed `vSolInBondingCurve` delta and
-record `sol_source = ReserveDelta`. PumpPortal M1 has no slot, block time, or DEX trades, and has
-curve reserves; detectors branch at wiring.
+record `sol_source = ReserveDelta`. A secondary provider that decodes an instruction amount records
+`sol_source = Instruction`; the detector sees one shape either way. PumpPortal M1 has no slot,
+block time, or DEX trades, and has curve reserves; a Geyser-class secondary carries slot and
+`blockTime`. Detectors branch on the capability record at wiring, never on the provider name.
 
 ## 3. Subscription gate
 
@@ -94,7 +97,11 @@ deduplicated trades; a USD threshold uses the cached rate.
 3.0 SOL over 5 min is ~0.6 SOL/min and is a guess, not the old 10 s top-decile figure; it implies
 keeping any mint that trades at that pace, which makes the 16 retained slots, not the threshold, the
 binding cap. Revisit against the first week of counters. A slower riser is retained only by CTO (M3)
-or a watch-set hit (M5); TTL then resets on any rolling 60 s with `>= 0.5 SOL (PRIOR)`.
+or a watch-set hit (M5); TTL then resets on any rolling 60 s with `>= 0.5 SOL (PRIOR)`. From M6 the gate is a planner plus
+one ledger per source: the planner decides the desired set once and issues the same entry to both
+ledgers, so a switchover does not resubscribe. Caps and refusals are counted per ledger; one
+provider refusing a subscription does not change the other, and the desired set does not shrink
+because the standby is unhealthy.
 
 ### 3.2 Caps and cap-hit behaviour
 
@@ -122,8 +129,10 @@ a cap allows;
 `Unsubscribe` sent-but-not-desired with backoff; after `gate.unsub_retries`, set `UnsubFailed` and
 **recycle the socket** — bump generation, close, reconnect, rebuild. Closing is the only guaranteed
 unsubscribe without a vendor ack; a recycle is an outage (one identity, rings cold) and beats a
-leak. No command bypasses the single-socket gate; a second admission sets `Failed` and counts
-`invariant_violations`.
+leak. No command bypasses the per-provider socket gate; a second admission to the same provider
+sets `Failed` and counts `invariant_violations`. From M6 there are two providers and therefore two
+sockets, one each; `feed.authoritative` decides which pipeline's output is live and the other is a
+warm standby (`failover.md`).
 
 ## 4. Supervisor, watchdog, reconnect
 
@@ -174,7 +183,7 @@ within 10 s PRIOR); failure re-bans and counts `ban_retries`. A ban never drives
 1. Record `gap_start` (last create `recv_ns`, each mint's `last_seen_sig`).
 2. Bump `Generation` before closing, invalidating in-flight frames.
 3. `Close`; wait 2 s (PRIOR), then abort and count `close_forced`.
-4. Release `sockets_open`; open; first frame within 10 s (PRIOR), else fail.
+4. Release `sockets_open[source]`; open; first frame within 10 s (PRIOR), else fail.
 5. Resubscribe every desired entry with a fresh `SubGen`.
 6. Block-heal creates over the gap; curve-heal every retained mint.
 7. Keep rings cold until re-warmed (`volume.md`); reset backoff after the healthy interval.
@@ -273,12 +282,19 @@ duplicates or truncation). Never pool strata. A stratum p50 above `feed.shadow.t
 | Aggregate error direction (loss vs duplicates) | Truth: RPC has its own lag and truncation |
 | That two sources disagree enough to bar failover | Health between samples, or causality |
 
-The metric assumes uniform loss within a mint and window; failover remains out of scope without
-much more evidence (`../SCOPE.md §6.4`).
+The metric assumes uniform loss within a mint and window. From M6 the same comparison runs against
+the warm standby as a second series (`standby vs live`), because the RPC shadow and the standby
+answer different questions: the sample reads chain state, the standby reads a second provider's
+stream. They are reported separately and never pooled. Failover itself — the switch rules, the
+warm-standby pipeline, per-source dedup and the license gate — is `failover.md`, not a loosening of
+this section. A second provider is still one authoritative source per window; two sources are never
+summed.
 
 ## 8. Config
 
 All defaults PRIOR; units are in the key. Constants in prose are compiled-in priors.
+`feed.secondary.*` and `feed.failover.*` are in `failover.md` §10; `capture.*` and `backtest.*`
+are in `backtest.md` §7. They are not repeated here.
 
 ### feed.*
 | Key | Unit | Default | Reasoning |
@@ -317,13 +333,15 @@ All defaults PRIOR; units are in the key. Constants in prose are compiled-in pri
 
 ## 9. `/health`
 
-The boot line (`operations.md`) reads `feed.mode`, `feed.generation`, `feed.sockets_open` and
-`gate.subs_live`.
+The boot line (`operations.md`) reads `feed.mode`, `feed.generation`, `feed.sockets_open` (per
+provider) and `gate.subs_live`.
 
 | Field | Meaning |
 |---|---|
 | feed.state / feed.mode / feed.unverified | Connected, Suspected, Probing, Reconnecting, Banned, Failed; `single-source` until M2b; true until shadow clears tolerance |
-| feed.generation / feed.sockets_open / feed.session_uptime_s / feed.create_age_s / feed.trade_age_s / feed.watchdog_threshold_s | Socket identity, 0/1 invariant, uptime, event ages, current T |
+| feed.authoritative / feed.source_state{primary,secondary} / feed.sockets_open{primary,secondary} | Which provider's pipeline is live, each provider's state, each socket count 0/1 with total ≤2 (M6); before M6, `authoritative = primary` and the secondary is `unavailable` |
+| feed.switches_total / feed.last_switch_ms / feed.switch_reason / feed.boundary_frames_dropped / feed.failover_cold_rings_total | Switchover history, reason class and its cost (M6) |
+| feed.generation / feed.sockets_open / feed.session_uptime_s / feed.create_age_s / feed.trade_age_s / feed.watchdog_threshold_s | Socket identity, per-provider 0/1 invariant, uptime, event ages, current T |
 | feed.msgs_in_total / feed.msgs_per_s_ewma / feed.events_per_sec / feed.events_accepted_total / feed.frames_dropped / feed.stale_generation_dropped | Messages received and accepted by type; must-be-zero drop / superseded frames |
 | feed_lag, decode_us, detect_us, enqueue_us | Per-stage p50/p99/p999 with the measured stage rate; p999 is required (`../SCOPE.md §4`); `budget_wait_ms`, `http_us` and `total_ms` are delivery-owned |
 | feed.dup_dropped / feed.dedup_entries / feed.dedup_evicted_early | Dedup outcome and size |
@@ -338,7 +356,7 @@ A sample health read: `feed.msgs_per_s_ewma` 0.94, `gate.msgs_charged_total` 81,
 `gate.sol_spent_today` 0.081, `gate.estimated_sol_per_day` 0.081; the sample satisfies
 `msgs_charged / 10,000 × 0.01`.
 
-`sockets_open > 1`, `invariant_violations > 0`, `frames_dropped > 0`, or `gate.budget_hit` is
+`sockets_open[provider] > 1`, `sockets_open_total > 2`, `invariant_violations > 0`, `frames_dropped > 0`, or `gate.budget_hit` is
 red; `feed.unverified` is amber in every card footer.
 
 ## 10. M1 acceptance tests
@@ -347,7 +365,7 @@ Test counts, durations and tolerances are acceptance priors; runtime defaults ar
 |---|---|
 | F1 | Golden fixture: 100% of captured create/migrate/trade frames decode as expected; a field rename fails; unknown fields are tolerated and counted |
 | F2 | Over 60 min, accepted events/min within ±5% of a simultaneous reference count (working client for messages, RPC signatures for five mints); rate and window recorded |
-| F3 | 10 forced closes held 45 s each: 10 reconnects, 10 outage identities, `sockets_open` never >1, 0 duplicate trades after replay |
+| F3 | 10 forced closes held 45 s each: 10 reconnects, 10 outage identities, `sockets_open[provider]` never >1, 0 duplicate trades after replay |
 | F4 | Dedup and generations: a 10-minute capture replayed three times yields 0 accepted events after pass one, `dup_dropped` = 2 × accepted, and unchanged ring totals; 1k previous-generation frames after reconnect are 100% dropped |
 | F5 | 24 h soak: `watchdog_false_positives ≤ 2`; every watchdog reconnect heals >0 events or is counted; no reconnect while the probe says quiet |
 | F6 | 24 h at 0.5 creates/s: launch load is 5 concurrent per 10 s window against 4 slots, so skips are expected at ≈ 0.1/s (one per window on average) — `subs_live == min(subs_desired, max_subs) ≤ max_subs`, `launch_skipped` follows that rate and every skip marks the bundle `launch window missed`; no entry older than TTL + 2 reconcilers; `unsub_failed = 0`; every refusal counted |
@@ -370,3 +388,4 @@ Test counts, durations and tolerances are acceptance priors; runtime defaults ar
 | 6 | Is block heal worth its cost beyond a minute? | No. Cap at 150 slots and declare create coverage. Geyser is the real answer (`sources.md`). |
 | 7 | Do M5 account subscriptions consume gate caps? | Separate `gate.max_account_keys` (PRIOR 40) plus the same `gate.feed_sol_per_day` cap; an account trade alone does not retain a mint. |
 | 8 | Two identical trades in one transaction share every key field. | Accept the single loss; add `tx_index` when available. A frame ordinal would defeat replay dedup. |
+| 9 | Which secondary provider, and can its client ship under MIT? | A Geyser-protocol provider with a permissive client or a client generated from permissive proto definitions. `yellowstone-grpc` is AGPL-3.0 and must not be linked; M6 gates on a clean dependency tree (`failover.md` §14). |

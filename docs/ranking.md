@@ -1,8 +1,10 @@
 # Ranking and live matching — v1 spec
 
-Status: design for M5, 2026-10-25. Implements `../SCOPE.md` §2C, Q2, R6, R7 and B7/H5/H8 in `REVIEW.md`;
-changes no decision. Siblings: `feed.md`, `bundle.md`, `sources.md`, `delivery.md`, `operations.md`.
-Every invented number is **PRIOR** with its reasoning; §13 names what replaces it and what falsifies the design.
+Status: design for M5, 2026-10-25. Implements `../SCOPE.md` §2C, Q2, R6, R7, R12 and B7/H5/H8 in
+`REVIEW.md`; changes no decision. Entry and exit matching are both M5. Siblings: `feed.md`,
+`bundle.md`, `sources.md`, `delivery.md`, `operations.md`, `failover.md`, `backtest.md`.
+Every invented number is **PRIOR** with its reasoning; §13 names what replaces it and what
+falsifies the design.
 
 ## 0. Pipeline and invariants
 
@@ -10,12 +12,14 @@ Every invented number is **PRIOR** with its reasoning; §13 names what replaces 
 trade stream → rank writer (background) → day segments → weekly job → snapshot
                     │                              (bounded RPC)         │
                     └ coverage journal (fsync on gaps)                    ▼
-                                                    boot reload → account subscription → "entered"
+                                                    boot reload → account subscription
+                                                                  → "entered" / "exited"
 ```
 
 The store is never read on the alert path; the job is its only reader. One writer task. A cold watch
 set suppresses and counts, never fabricates. Every card carries the window, the covered subset, the
-fee mode, and open positions at their mark.
+fee mode, and open positions at their mark. Exit matching is live-only: it uses the position state
+built from the account subscription, never the rank store, and never fabricates a cost basis.
 
 ## 1. Store schema
 
@@ -192,11 +196,14 @@ mint authority. Out-and-back reconciliation.
 | `TICK` | rows u32, events u32, segment u32 | with the 30 s data sync |
 | `VENUE` | venue u8, events u32, mints u32, wallets u32 | with TICK |
 | `JOB` | close_ms u64, result u8, coverage_bp u16 | fdatasync before publish |
+| `SWITCHOVER` | from u8, to u8, at_ms u64, reason u8, boundary_frames u32, cold_rings u16 | fdatasync immediately |
 | `BOOT` / `SHUTDOWN` | pid u32, boot_id u64 | fdatasync |
 
 `BOOT` without `SHUTDOWN` opens an implicit gap from the last `TICK`, so a crash cannot become
 covered time; gaps are written for disconnect, decode stall, backpressure, disk error, unclean boot
-and quarantine.
+and quarantine. A `SWITCHOVER` is not a gap by itself: coverage follows the authoritative source,
+and only the boundary loss and any blind interval count against the window. The snapshot and the
+job report carry `sources_used` and `switches`, so a week that ran mostly on the secondary says so.
 
 `coverage_bp = 10000 × (window − Σ gaps)/window`, gaps clipped to the window, an unclosed gap counted
 to `close`. PRIOR `rank.coverage_min_bp` = **9,700** (≤ 5.04 h of 168 h) and
@@ -245,7 +252,7 @@ after cache pruning it may differ only in cluster/fee fields, recorded `rpc_cach
  "watch":[{"wallet":"…","cluster_id":"…","members":3,"pnl_lamports":…,"deploy_lamports":…,
    "breadth":4,"mints":["…"],"fee_mode":"resolved","flags":[]}],
  "coverage":{"ratio_bp":9930,"max_gap_ms":420000,"mints_watched":1234,"events_seen":8421001,
-   "venue":{"raydium":"gap"},"post_migration":"ok"},
+   "venue":{"raydium":"gap"},"post_migration":"ok","sources_used":["pumpportal"],"switches":0},
  "cfg_hash":"…","store_seq":918234,"sha256":"…"}
 ```
 
@@ -265,30 +272,71 @@ chunks; superseded events drop. Counters `acct_sub_keys`, `acct_sub_chunks`, `ac
 **Classification.** `txType` ∈ {buy, sell}; anything else drops and counts `acct_unknown_side`.
 `traderPublicKey` must be in the set; the mint is unrestricted, which is the point.
 
-**New position versus add.** State per `(wallet, mint)`: `{first_seen_ms, last_ms, balance_raw,
-buy_count, sol_bought, alerted_gen}`. Balance before = `newTokenBalance − tokenAmount`, clamped at 0.
-A buy is a new position iff balance before is 0, state is absent, or state is older than
+**New position versus add.** State per `(wallet, mint)`: `{episode_first_seen_ms, last_ms,
+balance_raw, tokens_peak, buy_count, sell_count, tokens_sold, sol_bought, sol_sold, entry_alerted,
+exit_fired}`. Balance before = `newTokenBalance − tokenAmount`, clamped at 0. A buy is a new
+position iff balance before is 0, state is absent, or state is older than
 `wallet.position_memory_ms` (24 h). Only a new position fires `entered`; an add increments
-`wallet_add_suppressed` and is never announced — one entry per position, not per buy. Sells update
-state and count `wallet_sells_seen`, never implying an exit. The touched set caps at
-`wallet.touched_cap` = 100,000 entries at 96 B ≈ 9.6 MB; evict idle > 24 h, then LRU, counting
-`wallet_state_evicted`; an evicted open position re-reads as new, which is accepted.
+`wallet_add_suppressed` and is never announced — one entry per position, not per buy. The touched
+set caps at `wallet.touched_cap` = 100,000 entries at 128 B ≈ 12.8 MB; evict idle > 24 h, then LRU,
+counting `wallet_state_evicted`; an evicted open position re-reads as new, which is accepted for
+entries and forfeits its exit (counted `exit_unpaired`).
 
-**Dedup and pacing.** Exact key `(wallet, mint, first_seen)`, `deliver.wallets.dedup_ttl_ms` =
-86,400,000 (24 h) retention in the delivery set; cooldown per `(wallet, mint)`
-`deliver.wallets.cooldown_ms` = 10,800,000 (3 h; band 1–4 h). Order: classify → new-position
-→ gates (`wallet.min_buy_sol` 0.25) → dedup → cooldown → budget → send. Suppression is counted.
+**Exits.** A position fires **one** `EXITED` card when
+
+```
+sold_share   = tokens_sold / tokens_peak              ≥ wallet.exit_share_bp / 10_000   (0.90)
+proceeds     = sol_sold                               ≥ wallet.min_exit_sol             (1.0 SOL)
+exit_fired   = false
+```
+
+`tokens_sold = tokens_peak − balance_raw` from `newTokenBalance` where the field is trustworthy
+(C6), else the sum of sell `tokenAmount` with the basis labelled `sell sizes`. `tokens_peak` is the
+highest balance observed during the episode; a buy does not reset the denominator. The card shows
+`sold_share`, `position closed` when the remainder is ≤ `wallet.exit_dust_bp` (0.05) of peak and the
+exact remainder otherwise, realised SOL, hold time, entry and exit price, and the wallet rank.
+
+- **Realised PnL.** `realised = sol_sold − sol_bought × (tokens_sold / tokens_peak)`, in integer
+  lamports, with `rank.fee_est_lamports_per_trade` applied to both sides and labelled
+  `fees estimated`. If `sol_bought` is zero or the state did not observe the entry, the card says
+  `cost basis unknown` and omits PnL. It never prints a number over an unobserved basis.
+- **Pairing.** `wallet.exit_require_entry` (PRIOR true) requires the episode to have been seen by
+  live matching. A pre-boot position, an evicted state, or a mint first seen mid-position is
+  `exit_unpaired`: no card. Pairing bounds exits by observed entries and keeps the card honest;
+  disabling it alerts any sell-down with the line `entry not observed`.
+- **Transfers are not exits.** A balance fall with no matching sell sets `transfer_out`, suppresses
+  the exit, and counts `exit_transfer_ambiguous`. A later sell may still fire if the remaining
+  balance reaches the share; the card then states the transfer.
+- **No re-entry confusion.** A new episode after the position returns to zero is a new
+  `episode_first_seen_ms` and can fire another exit; one position, one exit.
+- **Restart.** Position state is RAM-only. After a restart, pre-restart positions are unpaired and
+  cannot exit; count `exit_cold_on_restart` and let the boot line carry it. A restart is not a
+  promise that a live position is still watched.
+
+**Dedup and pacing.** Entry key `(wallet, mint, entry, episode_first_seen)`; exit key
+`(wallet, mint, exit, episode_first_seen)`; `deliver.wallets.dedup_ttl_ms` = 86,400,000 (24 h) in the
+delivery set. Entry cooldown per `(wallet, mint)` `deliver.wallets.cooldown_ms` = 10,800,000 (3 h;
+band 1–4 h); the cooldown **does not apply to exits**, so an entry and its exit inside three hours
+are both delivered. Order: classify → entry or exit → gates (`wallet.min_buy_sol` 0.25 for entries,
+`wallet.min_exit_sol` for exits) → dedup → entry cooldown → budget → send. Exits are sub-capped at
+`deliver.wallets.exit_hourly` (3/h) and rank above entries in the wallet queue. Suppression is
+counted, never silent.
 
 | Alert field | Source |
 |---|---|
 | `ENTERED`, wallet short + rank of 40, 7d PnL, cluster PnL, members | detector, snapshot |
 | breadth, deployment, fee mode, window, coverage, `bundle: no launch record` | snapshot |
 | buy size SOL, entry price, mint age, venue; health footer when not normal | live event, registry, `delivery.md` |
+| `EXITED`, sold share, closed/remainder, hold time, entry and exit price | live event, position state |
+| realised SOL, basis (`balance` \| `sell sizes` \| `unknown`), fees mode | position state, `rank.fee_est_lamports_per_trade` |
+| pairing line (`entry alerted 42 min ago` \| `entry not observed`), transfer note | position state, delivery |
 
 **Reachability.** The 40 wallets are a discovery set, not a per-wallet delivery promise. At 3
-entries/wallet/day, 40 wallets yield ~120 candidates/day against the 20/day cap: ~83% are suppressed
-and counted `wallet_budget_suppressed`. Queued alerts are ranked by `(wallet PnL desc, buy size
-desc)` before the budget.
+entries/wallet/day, 40 wallets yield ~120 entry candidates/day; exits on observed positions can
+add a similar number, so the combined ~240 candidates/day against the 20/day cap suppresses roughly
+92%, counted `wallet_budget_suppressed`. Exits are ranked before entries and within each kind by
+`(wallet PnL desc, size desc)` before the budget. The exit sub-cap means at most 3 of any hour's 6
+wallet posts are exits; entries are not promised the remainder either.
 
 ## 10. Configuration
 
@@ -309,18 +357,23 @@ desc)` before the budget.
 | `rank.pending_ttl_ms`, `rank.job_cron`, `rank.job_misfire_grace_ms` | ms / cron UTC / ms | 3,600,000 / `0 0 * * 1` / 3,600,000 | sub-threshold buys accumulate; weekly; late, not skipped |
 | `deliver.wallets.cooldown_ms`, `wallet.min_buy_sol` | ms / SOL | 10,800,000 / 0.25 | delivery-owned; 3 h in band; dust is not information |
 | `deliver.wallets.dedup_ttl_ms` | ms | 86,400,000 | delivery-owned; 24 h dedup window |
-| `wallet.touched_cap`, `wallet.position_memory_ms` | entries / ms | 100,000 / 86,400,000 | ~9.6 MB; 24 h idle is re-entry |
+| `wallet.touched_cap`, `wallet.position_memory_ms` | entries / ms | 100,000 / 86,400,000 | ~12.8 MB at 128 B; 24 h idle is re-entry |
 | `wallet.chunk_keys`, `wallet.add_alert` | keys / bool | 100 / false | vendor limit unverified; one entry per position |
+| `wallet.exit_share_bp`, `wallet.exit_dust_bp` | bp | 9,000 / 500 | 90% of peak sold is an exit; 5% remaining is closed |
+| `wallet.min_exit_sol`, `wallet.exit_require_entry` | SOL / bool | 1.0 / true | dust proceeds are not information; pairing keeps the basis honest |
+| `deliver.wallets.exit_hourly` | posts/h | 3 | an exit storm cannot crowd out entries; shares the 6/h wallet token bucket |
 
 ## 11. `/health`
 
 | Field | Meaning |
 |---|---|
 | `rank_rows`, `rank_segments`, `rank_bytes`, `rank_last_flush_ms`, `rank_flush_lag_ms`, `rank_basis_drift_rows`, `rank_corrupt_records`, `rank_quarantine_segments`, `rank_pruned_rows`, `rank_pruned_bytes` | store, writer, integrity, pruning |
-| `coverage_bp_7d`, `coverage_max_gap_ms`, `coverage_last_gap_ms` | §6 |
+| `coverage_bp_7d`, `coverage_max_gap_ms`, `coverage_last_gap_ms`, `coverage_sources_used`, `coverage_switches` | §6; switchover is not a gap, but it is part of the week's provenance |
 | `watchset_state`, `watchset_generation`, `watchset_age_ms`, `watchset_wallets`, `watchset_clusters` | boot line |
 | `watchset_cold`, `watchset_refused_coverage`, `watchset_short` | refusals |
 | `wallet_alerts_sent`, `wallet_budget_suppressed`, `wallet_cooldown_suppressed`, `wallet_add_suppressed`, `wallet_sells_seen`, `wallet_state_evicted` | wallet delivery and matching |
+| `wallet_exits_sent`, `wallet_exit_suppressed{cap,budget,unpaired,transfer,unverified}`, `wallet_exit_basis{balance,sizes,unknown}`, `wallet_exit_cold_on_restart` | exit matching and its honest denominators |
+| `wallet_positions_open`, `wallet_positions_closed`, `wallet_exit_share_p50` | position state and the observed sold-share distribution; never a hit rate |
 | `acct_sub_keys`, `acct_sub_chunks`, `acct_sub_failures`, `acct_events`, `acct_unknown_side` | subscription |
 | `rank_last_job_ms`, `rank_last_job_result`, `rank_job_duration_ms`, `fee_mode_{resolved,estimated}`, `venue_events{curve,pumpswap,raydium}` | job, modes, coverage |
 
@@ -342,6 +395,15 @@ desc)` before the budget.
 | 12 | 10 alerts in 1 h, ranks interleaved | ≤ 6 posted, highest PnL first, rest counted |
 | 13 | Mock fee RPC at 900,000/trade | `resolved`; PnL moves by 400,000 × trades |
 | 14 | 24 h PumpSwap probe | ≥ 50 mints and ≥ 100 events, or `post_migration = gap` and M5 blocked |
+| 15 | Buy, then sells at 50%, 89.9%, 90.0%, 100% of peak | 0 / 0 / 1 / 0 cards; `EXITED` once, `exit_fired` latched |
+| 16 | 90% sold with 0.9 SOL proceeds, then 1.0 SOL | no card, then card; `wallet.min_exit_sol` exact at the boundary |
+| 17 | Entry posts, exit 30 min later | 2 posts; entry cooldown does not suppress the exit |
+| 18 | Transfer out 60%, then sell 30% of peak | no exit on the transfer, `exit_transfer_ambiguous = 1`; the sell reaches 90% and the card states the transfer |
+| 19 | Position opened before boot; sell 100% | `exit_unpaired = 1`, 0 posts; with pairing off, 1 post, `entry not observed`, no PnL |
+| 20 | 10 exits in one hour with entry candidates queued | 3 exits posted, 7 `wallet_exit_suppressed{cap}`; entries still use the remaining wallet tokens |
+| 21 | Buy 30M tokens for 3.5 SOL, sell 27M for 4.0 SOL | realised `4.0 − 3.5 × 0.9 − 2 fees` = 0.85 SOL minus fees; sold share 90%; closed? remainder 10% → no |
+| 22 | Replay a recorded wallet day | Identical exit cards, suppressions and order; `report_sha256` stable |
+| 23 | Restart with three open positions | All three `exit_unpaired`; `exit_cold_on_restart = 3`; boot line carries it, no card |
 
 ## 13. Open questions and recommendations
 
@@ -356,3 +418,8 @@ desc)` before the budget.
 | Retention 10 days | keep | > 259,000 rows/day, which trips 512 MiB inside 10 days |
 | Raydium gap | the 24 h PumpSwap gate is the only defence | < 100 PumpSwap events in 24 h |
 | Cooldown 3 h / weekly rebuild | keep both: 3 h is inside the band; weekly matches "the previous week", while daily would be yesterday's winners | wanted repeats inside 3 h, or noise above budget |
+| Exit threshold 90% of peak, dust 5% | keep; it catches the whale that leaves dust and never sells it, while a 50% trim is not an exit | more than 40% of exits fire with a 4–5% remainder, which reads as a trim |
+| Pairing on by default | keep; an unpaired exit has no basis and is not a promise the bot can keep | unpaired exits exceed paired ones, meaning watch-set churn makes the family mostly silent |
+| Exit sub-cap 3/h | keep; protects entries from an exit storm | exits fill the cap every hour while entries starve |
+| Exits share the 20/day cap | keep; no separate promise, no separate channel | exits consume most of the daily cap and entry delivery collapses |
+| Transfers out | suppress and count, never alert as an exit; state it if a later sale fires | transfers exceed 10% of positions that leave |

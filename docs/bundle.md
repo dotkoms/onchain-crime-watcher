@@ -1,6 +1,6 @@
 # Bundle status and CTO subsystem
 
-Status: design spec, 2026-10-25. Implements `SCOPE.md` revision 2 §2B, §7, Q3–Q5, R3–R5, R8 and
+Status: design spec, 2026-10-25. Implements `SCOPE.md` revision 5 §2B, §7, Q3–Q5, R3–R5, R8 and
 milestones M3/M4 of §9. The contract is [../SCOPE.md](../SCOPE.md); this file must not contradict
 it. Every number marked **PRIOR** is invented and carries its rationale.
 

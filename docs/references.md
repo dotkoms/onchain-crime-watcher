@@ -112,3 +112,10 @@ upstream can be leaned on for rate-limit or edit semantics.
 | Apache-2.0 | chainstacklabs/pumpfun-bonkfun-bot | Direct use with notice |
 | AGPL-3.0 | yellowstone-grpc | Server use only; do not copy into our binary |
 | None detected | pump-public-docs, Shyft, solana_meme, bundler, copy-trading, DexScreener wrappers | Concepts only; verify the LICENSE file before any reuse |
+
+**The M6 secondary client is a license gate.** Failover (`../docs/failover.md`) is the first
+feature that needs a dependency we have not shipped: a second provider's client. `yellowstone-grpc`
+is AGPL-3.0 and must not be linked into this MIT binary. M6 ships only with a permissively licensed
+provider SDK or a client generated from permissively licensed proto definitions; the chosen
+client, version and license read are recorded here at build time, and CI denies copyleft licenses
+in the binary's dependency tree. No code was cloned for any reference in this file.

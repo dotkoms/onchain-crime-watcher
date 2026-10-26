@@ -4,7 +4,8 @@ A Discord alert bot for Solana meme tokens. Rust for the data path, latency as t
 Built from scratch; `~/Projects/volume-scanner` is a reference for observed payload behaviour and
 hard-won lessons only — no code is carried over.
 
-Status: revision 4, 2026-10-25, reference-crawl pass after the consistency pass. No code
+Status: revision 5, 2026-10-25, scope additions after revision 4: capture and replay
+backtesting, hot failover between feeds, and exit alerts for watched wallets, all in v1. No code
 until explicit go on M1.
 
 ## 0. Revision log
@@ -57,6 +58,28 @@ until explicit go on M1.
     second opinion on the bundle fan-out prior; it does not change the contract value of 50.
   - No mature open-source Discord alert bot exists for this domain, so the delivery spec remains
     ours rather than adapted from an upstream.
+- **2026-10-25 — revision 5 (scope additions).** Three capabilities move from "not in scope" to
+  v1, each with a written contract rather than a loosened promise:
+  - **Backtesting becomes capture plus replay.** The bot records raw frames pre-decode and
+    pre-dedup from M1, and a deterministic harness replays them through the production decode,
+    dedup, gate, detectors and delivery admission under a virtual clock (`docs/backtest.md`). A
+    replay measures the arrival history, never chain truth; it cannot yield precision, recall or
+    base rates. Any threshold fitted on a replay carries a train/test split and a report hash, or
+    boot fails.
+  - **Hot failover between feeds.** PumpPortal permits one socket, so the second feed is a second
+    provider (recommended: a Geyser-protocol provider with a permissively licensed client). Two
+    sessions and two pipelines run in parallel; exactly one is authoritative at any instant; the
+    standby is warm; roles swap wholesale with no merging. Switch rules, a flap guard, per-source
+    dedup and the license gate are in `docs/failover.md`; decisions R11.
+  - **Exit alerts for watched wallets.** A watched wallet's position fires one `EXITED` card when
+    sold tokens reach `wallet.exit_share_bp` (90%, PRIOR) of the position's peak and proceeds
+    reach `wallet.min_exit_sol`; pairing requires the entry to have been observed by live
+    matching, and one episode fires once. Exits share the wallet budget with entries, rank above
+    them in the queue, and never imply a position the bot did not see (`docs/ranking.md` §9).
+  - The license stays MIT. The secondary client is the first dependency that can change that, so
+    M6 adds a copyleft deny-list to CI and does not start until the dependency tree is clean.
+  - Not in scope is rewritten rather than deleted: a backtest of a period the bot did not record,
+    paper trading, and execution remain out.
 
 ## 1. What it does
 
@@ -207,16 +230,33 @@ open new positions.
 - **Watch set.** Top ~40 wallets, config value, not validated. Persisted as a bounded snapshot with
   a generation date and reloaded at boot; a missing or stale snapshot suppresses wallet alerts and
   counts `watchset_cold` rather than pretending the family is healthy. The set is a **discovery
-  set, not a delivery promise**: at ~3 entries per wallet per day it yields ~120 candidates/day
-  against the 20/day wallet cap, so ~83% are suppressed by budget and counted
-  `wallet_budget_suppressed`.
+  set, not a delivery promise**: at ~3 entries per wallet per day it yields ~120 entry
+  candidates/day, and exits on observed positions can add a similar number, so ~240 candidates/day
+  against the 20/day wallet cap suppresses roughly 92%, counted `wallet_budget_suppressed`.
 - **Live matching.** A dedicated account subscription over the watch-set wallets in chunks, so a
   ranked wallet is seen on any mint, not only on watched ones. The subscription is metered like
   per-mint trades and draws from the same total per-UTC-day budget, `gate.feed_sol_per_day` (prior
-  0.5 SOL/day), which includes launch windows with no exemption. **Buys only** fire "entered"; a
-  sell is a different event and is not announced as a new position. Exits are deferred out of v1;
-  the card never implies one.
-- **Dedup and pacing.** Keyed `(wallet, mint, first_seen)`, cooldown 1–4 h per `(wallet, mint)`.
+  0.5 SOL/day), which includes launch windows with no exemption. Buys fire "entered"; adds are
+  counted and never announced. Sells update the position and are the basis of the exit family
+  below.
+- **Exit alerts.** A position fires **one** `EXITED` card when cumulative sold tokens reach
+  `wallet.exit_share_bp` (PRIOR 90%) of the position's peak and cumulative sale proceeds reach
+  `wallet.min_exit_sol` (PRIOR 1.0 SOL). The trigger is `newTokenBalance` on the sell where
+  available (R4), else cumulative sell sizes, with the basis labelled on the card. The card shows
+  the sold share, whether the position is closed (remaining ≤ `wallet.exit_dust_bp`, PRIOR 5% of
+  peak), realised SOL against observed average cost with estimated fees, hold time from the
+  labelled receive-time proxy, entry and exit price, and the wallet's rank. **Pairing:** with
+  `wallet.exit_require_entry` (PRIOR true) an exit fires only for a position live matching saw
+  open; a pre-boot or evicted position is counted `exit_unpaired` and posts nothing, because the
+  bot cannot show a cost basis it never observed. Exits do not fire on transfers out; a balance
+  fall with no matching sell suppresses the exit and is counted. One exit per position episode:
+  dedup is keyed on `(wallet, mint, episode_first_seen, exit)`, and the entry cooldown does not
+  apply to an exit, so an entry and its exit inside three hours are both delivered.
+- **Dedup and pacing.** Keyed `(wallet, mint, entry, episode_first_seen)` for entries and
+  `(wallet, mint, exit, episode_first_seen)` for exits; entry cooldown 1–4 h per
+  `(wallet, mint)`. Exits share the wallet channel's hourly and daily budgets with entries, rank
+  above them in the queue, and are sub-capped at `deliver.wallets.exit_hourly` (PRIOR 3/h) so an
+  exit storm cannot crowd out entries. Suppression is counted, never silent.
 
 **Rank aggregate store.** Realised PnL needs cost basis per wallet per mint over seven days, which
 cannot live in RAM at pump.fun token counts. A bounded store on disk holds per (wallet, mint):
@@ -239,14 +279,24 @@ stored row can be checked against the mint's current state.
 
 - A full trade history or any database the alert path depends on. The rank and launch-record store
   is the bounded, prunable side store described above: off the hot path, never read for a live
-  alert, allowed to lag, allowed to be partial and say so.
-- Paper trading, portfolio tracking, copy-trading, or order placement.
+  alert, allowed to lag, allowed to be partial and say so. Raw-frame capture is not a trade
+  history either: it is a bounded, prunable evidence file for offline replay, never queried by a
+  detector, and allowed to drop with a count.
+- Portfolio tracking, copy-trading, or order placement.
 - Replying to users, dashboards, or a web UI.
 - Multi-chain. Solana meme tokens only.
-- Hot failover between feeds. A shadow verifier is in scope; automatically switching the
-  authoritative source is not, without measured disagreement data.
-- Exit alerts for watched wallets. Deferred; not implied by any card.
-- A backtest harness. With no recorded stream, a swept threshold is a preference, not validation.
+- A backtest of a period the bot did not record. Capture starts in M1 and the replay harness only
+  sees what arrived; there is no historical reconstruction and no chain-truth backfill. A
+  threshold swept over unrecorded history remains a preference, not validation.
+- Paper trading, execution simulation, slippage, fills, or any hypothetical portfolio. The replay
+  harness re-runs decisions and admission; it places no orders and values no position it did not
+  observe.
+- Precision, recall, hit rate or base rates. No outcome labels exist; a replay's forward marks are
+  a censored proxy and are labelled as one.
+- A second PumpPortal socket, or a second key used to evade the vendor's one-socket limit. Hot
+  failover is a second provider, not a second connection to the first.
+- Multi-region or multi-process high availability for the bot itself. Failover covers the trade
+  feed; the process, Discord, RPC and the side stores degrade per §6.6.
 
 ## 4. Latency model
 
@@ -262,13 +312,14 @@ can be measured:
 | Budget admission | 0 – 1/rate | 10/hr volume ⇒ up to 6 min; 6/hr wallets ⇒ up to 10 min. Burst capacity 2–3 posts a cluster immediately |
 | HTTP POST to 2xx | 100–300 ms | Discord, independent of our code |
 | CTO end to end | minutes to hours | Curation on the vendor's side dominates; the poll adds 0–60 s |
+| Feed switchover | 0.1–2 s + one partial bucket dropped | Warm standby is already subscribed and warm; the outgoing partial (≤ 15 s) is dropped, and frames in flight (≤ 1024, ~1 s at peak) are counted and discarded |
 | Volume end to end | ~0.5–15 s + admission | From event time |
 
 Instrumentation, required before any of these numbers is repeated: `event_time` where available,
 `recv: Instant`, and per-stage histograms (`feed_lag`, `decode_us`, `detect_us`, `enqueue_us`,
-`budget_wait_ms`, `http_us`, `total_ms`) at p50/p99/p999 with the measured rate. A counting
-`GlobalAlloc` test pushes 10k frames through decode + detect and asserts zero allocations after
-warmup. A 2× peak saturation run uses `tokio-console`.
+`capture_tap_us`, `budget_wait_ms`, `http_us`, `switchover_ms`, `total_ms`) at p50/p99/p999 with
+the measured rate. A counting `GlobalAlloc` test pushes 10k frames through decode + detect and
+asserts zero allocations after warmup. A 2× peak saturation run uses `tokio-console`.
 
 ## 5. Architecture
 
@@ -276,32 +327,39 @@ Rust workspace, single binary, tokio.
 
 ```
 crates/
-  feed/        Feed session trait, PumpPortal adapter, per-adapter decode, supervisor,
-               watchdog, generation counter, dedup, shadow probe
-  gate/        Subscription gate and ledger: which mints get trades, caps, unsubscribe on prune
-  registry/    mint -> {created_at, state, state_seq, ring, enrich, bundle, last_seen},
-               lifecycle sweep, eviction, tombstones, regime resets
-  detect/      volume anomaly, bundle status, CTO, wallet-hit
-  wallet/      in-RAM watch set, wallet stats, live buy matching
-  rank/        rolling 7-day per-(wallet, mint) aggregates, weekly snapshot job
-  enrich/      RPC balance/funding reads, cache, TTLs, refresh task
-  deliver/     Discord sender: serialized queue, token bucket, hold queue, dedup, message-id
+  feed/        Feed session trait, PumpPortal adapter, secondary/Geyser adapter, per-adapter
+               decode, supervisor, watchdog, generations, dedup, shadow probe, failover
+               controller, warm-standby pipeline
+  gate/        Subscription planner and per-source ledgers: which mints get trades, caps,
+               unsubscribe on prune
+  registry/    mint state and lifecycle, ring ownership, eviction, tombstones, regime resets
+  detect/      volume anomaly, bundle status, CTO, wallet-hit, wallet-exit
+  wallet/      watch set, wallet stats, live buy and exit matching
+  rank/        rolling 7-day aggregates, weekly snapshot job, switchover coverage records
+  enrich/      funding and balance reads, cache, TTLs
+  deliver/     serialized queue per webhook, token bucket, hold queue, dedup, message-id
                store, circuit breaker
-  config/      thresholds, budgets, routing, timeouts, backoff, caps
-  bin/         wiring, health endpoint, supervisor tree, graceful shutdown
+  capture/     raw-frame recorder, segments, manifest, capture-gap accounting
+  replay/      virtual clock, deterministic replay, delivery simulation, reports (offline)
+  config/      thresholds, budgets, routing, timeouts, backoff, caps, provenance
+  bin/         wiring, health, supervisor tree, graceful shutdown, `replay` subcommand
 ```
 
 Rules that apply across crates:
 
-- **One decode + detect task per feed.** Frames are decoded from `&bytes` and detection runs in the
-  same stack frame, so the borrow stays valid. There is no trade channel: a borrowed struct cannot
-  cross one, and at pump.fun rates the split buys nothing. Channels exist after detection, where
-  alerts are discrete.
+- **One decode + detect task per source.** Frames are decoded from `&bytes` and detection runs in
+  the same stack frame, so the borrow stays valid. There is no trade channel: a borrowed struct
+  cannot cross one, and at pump.fun rates the split buys nothing. Channels exist after detection,
+  where alerts are discrete. Each source owns a full pipeline — registry, rings, cohorts, dedup —
+  and exactly one pipeline is authoritative at a time. Two sources are never merged and never
+  summed; on switchover the roles swap wholesale (`docs/failover.md` §4).
 - **Channel classes are explicit.** `snapshot` (idempotent, latest-wins fine), `delta` (must sum,
   never drop), `event` (discrete, drop with a count). Volume deltas are never latest-wins; a
   dropped trade is a wrong answer, not a late alert, and `dropped_trades` is red health.
 - **One event enum between stages**, with fixed-width fields (`[u8; 32]` mint, `u64` lamports,
-  `i64` time); strings never appear in the trade path and are resolved at the card.
+  `i64` time); strings never appear in the trade path and are resolved at the card. SOL carries
+  `sol_source` of `Payload | ReserveDelta | Instruction`, so a decoded secondary feed is the same
+  shape as the primary and no detector branches on the source.
 - **Registry owns every per-mint allocation.** Eviction: idle TTL (prior 30–60 min) → dead; a
   hard live-mint cap with LRU; a tombstone set for recently dead mints. Re-entry allocates a cold
   ring, is counted, and never alerts while cold.
@@ -310,7 +368,12 @@ Rules that apply across crates:
   quotes the state and sequence it was computed under.
 - **Dedup** keyed on `(signature, mint, trader, txType, tokenAmount)` or signature plus
   transaction index where available — one transaction can contain several trades — sized by
-  `rate × (replay + heal window) × 1.5`, not by time alone.
+  `rate × (replay + heal window) × 1.5`, not by time alone. Each source has its own dedup set;
+  sharing one across sources would let a standby event suppress an authoritative one.
+- **Capture is a tap, not a dependency.** The pipeline clones the frame handle into a bounded
+  capture channel; recording may drop and count, never backpressure decode, and no alert path
+  reads a capture file. Replay links the production crates and shares no state with the live
+  process.
 - **Supervision.** `panic = "unwind"`, every long-lived task's `JoinHandle` retained in a
   `JoinSet`; a panicked stage is respawned with jittered backoff under a restart budget, then the
   stage goes red and stops. Shutdown via `CancellationToken`; the sender flushes with a deadline
@@ -326,9 +389,11 @@ Rules that apply across crates:
 
 ### 6.1 One primary feed, metered per mint
 
-PumpPortal is the single authoritative trade feed for M1–M2. New-token and migration events are
-free; **trades are metered per mint** (0.01 SOL per 10,000 messages), the API key must be linked to
-a wallet holding ≥ 0.02 SOL, and **one websocket connection at a time** is permitted.
+PumpPortal is the primary trade feed through M5. From M6 it is one of two providers, and the
+vendor's **one websocket at a time** limit applies per provider, not per process: two providers
+means two sockets, one per provider, each asserted independently. New-token and migration events
+are free; **trades are metered per mint** (0.01 SOL per 10,000 messages), the API key must be
+linked to a wallet holding ≥ 0.02 SOL, and **one websocket connection at a time** is permitted.
 
 So the gate is part of the architecture, not an optimisation:
 
@@ -344,7 +409,10 @@ So the gate is part of the architecture, not an optimisation:
 - **Caps and TTL.** A hard cap on concurrent subscriptions (prior 20 slots), a per-mint TTL,
   unsubscribe on prune, and a reconcile task. `subs_live`, `unsub_failed`, `subs_capped`,
   `events_per_sec` and `estimated_sol_per_day` are config values and `/health` counters.
-- **Single socket invariant**, asserted at runtime. No parallel probe connections.
+- **Single socket invariant per provider**, asserted at runtime: `sockets_open[provider]` is 0 or
+  1 for each configured provider, and the process total is at most two. No parallel probe
+  connections. A second socket to the *same* provider is a ban risk and an invariant violation,
+  never a failover path.
 - **Unresolved is not a fill.** A raw Geyser or ShredStream event the decoder cannot resolve to a
   concrete trade is held as `unknown`, excluded from buckets and aggregates, and counted
   `unresolved_events`. It becomes volume only when resolved against the transaction. Public
@@ -371,6 +439,9 @@ itself as **single-source, unverified** and never claims that silence means a qu
 | Panic | `JoinHandle` join error | respawn under restart budget | restart counter |
 | Backpressure | channel class | delta channels never drop; event channels drop with a count | drop-by-reason counter |
 | Ban (excess connections) | repeated timeouts | stop restarting, health red, wait out the hour | banned state |
+| Primary provider lost (M6) | session exit, watchdog, or ban | promote the warm standby; no re-warm; drop the outgoing partial and count boundary frames | card footer names the source for 10 min; not an outage identity |
+| Both providers lost (M6) | both source states | no authority, suppress alerts, one `trade_stream` outage identity | outage card, `stale` |
+| Capture queue full | bounded tap | drop the record, write a marker, never block decode | `capture_dropped_frames`, amber |
 
 Event time: the trade payload carries **no timestamp and no slot** (observed, not documented). The
 bot therefore buckets on a monotonic receive time, anchored to the arrival of that token's
@@ -404,25 +475,41 @@ fee sample — labelled resolution, not routing.
   path below or the card contract degrades honestly; the watch set is reloaded from its snapshot or
   the wallet family is suppressed and counted.
 
-### 6.4 Shadow verification, not fake HA
+### 6.4 Shadow verification and hot failover
 
-One authoritative feed plus one **shadow** whose only job is to disagree. Not hot failover in v1.
+One authoritative feed at any instant, plus up to two independent checks. From M2 to M5 the
+check is an RPC sample whose only job is to disagree. From M6 a second provider runs a **warm
+standby** — a full pipeline that is subscribed, decoded, bucketed and counting, but whose
+candidates are discarded and counted — and can be promoted in seconds. The RPC sample stays: two
+feeds can share upstream infrastructure, so a second ingest is not a substitute for an
+independent chain read.
 
-| Shadow option | Cost | What it proves |
+| Check | Cost | What it proves |
 |---|---|---|
-| RPC sampling of active mints (last-trade timestamp, trade count per aligned window) | low | primary liveness and coarse loss, on a sample |
-| DexScreener / GeckoTerminal polls | low, slow | price sanity, nothing about individual trades |
-| Full second ingest (Geyser, own decode) | high | near-complete integrity check; the only basis for failover later |
+| RPC sampling of active mints (last-trade timestamp, trade count per aligned window) | low | Authoritative feed liveness and coarse loss, on a sample |
+| DexScreener / GeckoTerminal polls | low, slow | Price sanity, nothing about individual trades |
+| Second full ingest, warm standby (Geyser or equivalent) | high | Near-complete integrity check and the basis for failover; carries its own gaps |
 
 Start with RPC sampling in M2. Disagreement is measured per sampled mint per aligned 10-minute
 window as `|primary − shadow| / max(primary, 1)`, over ~20 mints stratified across volume deciles
 including at least five from the bottom, reported at p50/p90 per stratum. It assumes loss is
 uniform; the doc says so.
 
-Rules for any multi-source future: never sum two sources — exactly one is authoritative per
-window; a disagreement blocks the *quiet market* conclusion and tags alerts but does not block
-alerting; failover needs cross-source dedup, source priority and the same generation discipline,
-and is its own milestone.
+**Failover contract (M6).** Two providers, two session tasks, two pipelines, one authority. Switch
+primary → secondary when the primary is banned, failed, or out of contact beyond the outage
+threshold and the secondary is fresh; switch back only after five minutes of primary health and
+aligned agreement within tolerance. A disagreement tags alerts and blocks switch-back but never
+forces a switch on its own. A flap guard holds the current authority after three switches in an
+hour. Roles swap wholesale: no ring is merged, no source is summed, and each source keeps its own
+dedup set and generation stream. The outgoing partial bucket is dropped and the boundary frames
+are counted, so no bucket ever contains two sources. The full contract is `docs/failover.md`;
+decisions R11.
+
+Rules for any multi-source operation: exactly one source is authoritative per window; never sum
+two sources; cross-source agreement is evidence, never a merged series; failover needs its own
+acceptance tests (forced failures, duplicates, boundary loss) before it is called hot; and a
+second provider whose client is copyleft cannot enter the binary — MIT is the project's license
+and M6 adds a dependency deny-list before it starts.
 
 ### 6.5 Error handling by stage
 
@@ -432,7 +519,9 @@ and is its own milestone.
 | detect | division by zero, NaN, invariant break | guard, route to `cold_baseline` or drop, count, never emit from an invalid statistic |
 | enrich | timeout, 429, missing account | retry with jitter; serve cache with an age stamp; beyond max stale age mark `unknown` |
 | rank store | disk full, corrupt file | quarantine, coverage partial, live alerts unaffected |
-| deliver | see 8 |
+| capture | disk full, queue full, torn tail | stop or drop with a written marker and a count; never block decode; never delete a live segment |
+| replay | corrupt segment, hash mismatch, missing config | refuse the report and name the segment, hash or key; a partial window is labelled, never presented as whole |
+| deliver | — | see §8 |
 | config | invalid at boot / reload | fail fast naming the field; keep last good on reload |
 | supervisor | task panic | restart under budget, then red |
 
@@ -448,12 +537,15 @@ condition, not `degraded`.
 | normal | source healthy, shadow agrees or absent within tolerance | normal |
 | warming | restarted; baselines or watch set cold | volume suppressed; wallet suppressed if the watch set is cold; CTO posts |
 | degraded | primary unresponsive, shadow alive | posted with a degraded footer |
-| unverified | single source, no shadow evidence | posted; footer says data is unverified |
+| unverified | single source, or two sources whose aligned comparison is over tolerance | posted; footer says data is unverified |
 | stale | no event longer than threshold | suppressed; outage card only |
 
 - **Outage identity** is `(identity, outage_start)`. Declared after 30 s, recovered after 60 s of
   health, so a blip posts nothing. The outage card is in the status lane and bypasses the hourly
-  and daily alert budgets entirely; it states start, end, duration and reason.
+  and daily alert budgets entirely; it states start, end, duration and reason. A provider
+  switchover is **not** an outage identity while another provider is authoritative; it is a
+  `SWITCHOVER` record, a footer tag for ten minutes, and a counter. Only `authoritative = none`
+  opens the `trade_stream` identity.
 - **One outage card per process lifetime**, unless the bot-token readback path is enabled, in which
   case the card is found by footer marker and edited. Webhooks cannot read history; the contract
   says which behaviour is in force.
@@ -482,7 +574,8 @@ condition, not `degraded`.
 | Pool price after migration | DexScreener pair data | Third-party index; labelled on the card |
 | Curve price | Payload reserves (`vSol`, `vTokens`) | Exact at the trade's moment |
 | SOL/USD | Exchange ticker or Pyth | Display only; signal math is in SOL; rate age shown |
-| Geyser (later) | Yellowstone gRPC provider | Raw truth, paid; carries slot and block time |
+| Second trade feed (M6) | Geyser-protocol provider, warm standby | Raw transactions/account updates, own decode; slot and block time; paid and **U**; client license is a build gate |
+| Replay capture (M1) | Local disk, raw frames | Arrival history, not chain truth; 2 GiB cap, 14 days, loss counted |
 
 No provider joins the hot path until its failure mode is written down: what happens on reconnect,
 on a gap, on a 429, and how the bot reports that it missed data. Post-migration coverage is a
@@ -496,7 +589,7 @@ Three webhooks, one per family, each with its own serialized queue, token bucket
 | Channel | Families | Budget |
 |---|---|---|
 | volume | volume fire, volume near | ~10/hr, capacity 2–3, *near* ≤ 30% |
-| wallets | wallet entries | ~6/hr |
+| wallets | wallet entries, wallet exits | ~6/hr, exits sub-capped at 3/hr; shared 20/day |
 | cto | CTO listing, bundle tier edits | `deliver.cto.hourly_cap` = 20/hr (circuit breaker) |
 
 Daily caps (prior 40 volume, 20 wallets) are the binding attention limit; hourly budgets are
@@ -506,8 +599,11 @@ is an outer guard, not a product allocation. The status lane — heartbeat and o
 bypasses both hourly and daily budgets entirely; a 5-minute heartbeat is 12 posts/hour and would
 otherwise exceed the volume channel's 10/hour.
 
-**Priority classes,** used only before send: status/outage > CTO listing > wallet entry > bundle
-edit > volume fire > volume near. A token bucket alone is first-come-first-served. Non-urgent
+**Priority classes,** used only before send: status/outage > CTO listing > wallet exit >
+wallet entry > bundle edit > volume fire > volume near. An exit outranks an entry because the
+position it describes is already open and the reader was told about it; both share one wallet
+budget, and the exit sub-cap stops an exit storm from starving entries. A token bucket alone is
+first-come-first-served. Non-urgent
 cards — volume *near* and wallet entries — wait in a reordering hold of `deliver.hold.window_ms` =
 45,000 ms; this is separate from `deliver.budget_wait_max_ms` = 600,000 ms, the maximum wait for
 budget admission that applies to fire, CTO listings and bundle edits. The 6–10 minute admission
@@ -516,9 +612,10 @@ token is available. Two of the volume hour's ten tokens are reserved for fire. P
 which alert survives a full budget, never whether the budget is exceeded.
 
 **Message ids and edits.** One id store, owned by `deliver/`; detectors keep tiers, not ids. Every
-post uses `?wait=true`; the response's message id is stored with `(mint, family, tier,
-card_state)`. Edits rebuild the full embed from that state. A missing id is a delivery failure, not
-a success. Posts and edits share the webhook's rate bucket, so one serialized queue covers both;
+post uses `?wait=true`; the response's message id is stored with
+`(mint, family, kind, tier, card_state)`, where `kind` distinguishes a wallet entry from its exit.
+Edits rebuild the full embed from that state. A missing id is a delivery failure, not a
+success. Posts and edits share the webhook's rate bucket, so one serialized queue covers both;
 one edit per message per 30–60 s, coalesced to the latest tier. For bundle cards, only Fire and
 Cleared tier transitions edit; a Near transition does not edit.
 
@@ -562,24 +659,35 @@ failure behaviour is written down.
    **payload fixture and pinned schema**, subscription gate and ledger, supervisor, watchdog,
    generations, dedup, registry/lifecycle with eviction, receive-time bucketing, `/health` with
    boot line and heartbeat, minimal sender (`wait=true`, startup check, outage card), rank-store
-   schema only (writer starts M2a). No signal alerts.
+   schema only (writer starts M2a), and the **raw-frame capture recorder** (pre-decode,
+   pre-dedup, bounded, loss counted) so recorded days exist before any threshold is judged. No
+   signal alerts.
    *Acceptance:* observed events/min within X% of a reference count over one hour; N forced
    disconnects produce N reconnects, N outage identities and one outage card (or N edits with
    readback enabled), 0 duplicate trades after replay; measured watchdog false positives over
    24 h; no subscription leak over 24 h; zero allocations per trade after warmup; gap-heal success
-   rate and declared-unhealed rate.
+   rate and declared-unhealed rate; capture round-trips byte-identically and its manifest gap
+   matches a forced disconnect.
 2. **M2a — Delivery proven.** Budgets, hold queue, priority classes, dedup/cooldown, degradation
    contract, rank-store passive writer, card template and validator, exercised with synthetic
-   alerts into staging channels.
+   alerts into staging channels; **replay harness core** (virtual clock, same decode/dedup/gate,
+   delivery admission simulation, decision journal) proven on the M1 fixture.
 3. **M2b — Volume family.** Per-mint ring and parameters, cohort percentiles, dispersion and
    participation tests, cold-baseline path, shadow probe and disagreement metric. First real
-   alerts.
+   alerts, gated on a **backtest report over at least seven recorded days** with a stated
+   train/test split (`docs/backtest.md` §6).
 4. **M3 — CTO family.** Poll, solana filter, diff with persisted high-water `claimDate` and
    posted-token set, latched per mint, wording.
 5. **M4 — Bundle.** Launch-record persistence, funding stage with exclusion list and fan-out cap,
    percent-sold from trades, tier state machine on the CTO card.
-6. **M5 — Wallets.** Ranking job, watch-set snapshot and boot reload, account subscription, buy
-   matching and pacing. Gated on coverage proving acceptable, including the post-migration test.
+6. **M5 — Wallets, entries and exits.** Ranking job, watch-set snapshot and boot reload, account
+   subscription, buy matching and pacing, **exit matching and the `EXITED` card** with pairing,
+   cost basis and the shared wallet budget. Gated on coverage proving acceptable, including the
+   post-migration test, and on a wallet/exit replay report.
+7. **M6 — Hot failover.** Secondary provider adapter with own decode, warm-standby pipeline,
+   arbitration, switchover records, per-source dedup and ledgers, two-source capture and replay,
+   and the copyleft dependency gate. Requires a provider whose failure mode is written down and
+   whose client is permissively licensed; a second PumpPortal socket is not an option.
 
 ## 10. Decisions
 
@@ -623,6 +731,22 @@ failure behaviour is written down.
     independently; status cards bypass the alert budget. *2026-10-25.*
 15. **R9 — Signal math in SOL.** Dollar display converts with a cached rate and shows its age; the
     signal never depends on an FX feed. *2026-10-25.*
+16. **R10 — Backtests replay recorded arrivals, not chain truth.** Raw frames are captured from M1,
+    pre-decode and pre-dedup, with receive time, generations and session lifecycle; the replay
+    harness runs the production code under a virtual clock and simulates delivery admission. A
+    fitted threshold carries `fitted_on`, `tested_on`, `fitted_at` and a report hash, or boot fails.
+    A replay cannot yield precision, recall, base rates or delivery latency. *2026-10-25 (revision
+    5).*
+17. **R11 — Failover is a second provider with a warm standby.** PumpPortal's one-socket limit is
+    not bypassed; a second provider runs a full parallel pipeline, exactly one source is
+    authoritative at any instant, roles swap wholesale with no merge, and each source keeps its own
+    dedup and generations. Switch rules, flap guard, and the copyleft dependency gate are
+    `docs/failover.md`. *2026-10-25 (revision 5).*
+18. **R12 — Exits are one card per observed position episode.** `EXITED` fires when sold tokens
+    reach 90% of peak (PRIOR) and proceeds reach 1.0 SOL, only for a position live matching saw
+    open unless pairing is disabled, once per episode, with cost basis labelled or omitted.
+    Exits share the wallet budget, outrank entries, and are sub-capped at 3/h. *2026-10-25
+    (revision 5).*
 
 Changes get a dated entry here rather than a silent edit.
 
@@ -639,3 +763,13 @@ Changes get a dated entry here rather than a silent edit.
 - DexScreener's CTO list retention window is a sample of one; a long restart may miss claims. The
   high-water `claimDate` and bounded posted-token set prevent reposts, but a claim below the
   high-water is counted `suppressed_by_high_water` and is not recovered.
+- A backtest replays what arrived. It cannot see what the feed dropped while connected, cannot
+  supply outcome labels, and cannot measure delivery latency; a forward mark is a censored proxy
+  over the alerts whose mint kept trading, not precision. Capture itself can drop, and the report
+  must state the hole. *Revision 5.*
+- Failover depends on a provider not yet selected. Its latency, spend, filter limits and client
+  license are all unverified; a second feed can share upstream infrastructure with the first, so
+  agreement is evidence, not proof. The secondary's own gaps are real gaps. *Revision 5.*
+- Exit alerts depend on `newTokenBalance` semantics (C6) and on live matching having seen the
+  entry. A pre-boot position, an evicted state, a transfer-out, or a sale on an unwatched venue
+  produces no exit or no basis; the card says which. *Revision 5.*

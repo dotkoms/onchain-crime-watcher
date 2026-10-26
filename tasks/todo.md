@@ -39,6 +39,6 @@ Live acceptance above is deliberately deferred at the user's request, not marked
 - [x] Opt-in free-only reconnection with paid-interruption and auth/429 guards.
 - [x] Local fault drills, history reset, cancellation and health/capture evidence.
 - [x] Complete local checks and runbook.
-- [ ] Push bounded recovery review branch.
+- [x] Push bounded recovery review branch (`codex/bounded-recovery`).
 
 Independent probing/heal, full task supervision and real staging acceptance remain pending.

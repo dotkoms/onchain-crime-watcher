@@ -23,9 +23,10 @@ curl http://127.0.0.1:9898/health
 ```
 
 The collector prints a boot JSON line and a final health snapshot. Ctrl-C shuts down collection,
-flushes capture and stops health. A transport failure attempts one optional outage POST and exits;
-automatic reconnect/backoff/watchdog policy belongs to M1c. Do not deploy this first slice in a
-restart loop. The process lock prevents two collectors using the same data directory; it cannot
+flushes capture and stops health. By default, a transport failure attempts one optional outage
+POST and exits. Opt-in bounded free-only recovery and separate transport/application liveness
+are documented in [recovery.md](recovery.md). Full supervision and probing remain M1c work;
+do not deploy this slice in an application restart loop. The process lock prevents two collectors using the same data directory; it cannot
 detect a separate application or host using the same provider key.
 
 For offline fixture inspection (not the full M2a replay harness):

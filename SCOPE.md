@@ -9,7 +9,8 @@ backtesting, hot failover between feeds, and exit alerts for watched wallets, al
 implemented; verification and remaining empirical acceptance are recorded in `docs/m1a.md` and
 `tasks/todo.md`. At the user's request, default startup is disconnected and real-data-only volume
 preparation proceeds without demos (`docs/real-data.md`). A staging sender is implemented behind
-explicit opt-in (`docs/staging-delivery.md`); real M1b acceptance and M1c remain pending.
+explicit opt-in (`docs/staging-delivery.md`). The first M1c transport-recovery slice is documented
+in `docs/recovery.md`; real M1b acceptance and the rest of M1c remain pending.
 
 ## 0. Revision log
 

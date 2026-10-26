@@ -64,3 +64,25 @@ Defaults: 10/hour and 40/rolling-day volume attempts, burst two with six-minute 
 most 30% of each budget, two hourly slots reserved for fire. Failed/unknown attempts consume
 capacity conservatively. Staging is labelled; production remains gated. Readiness GET checks
 webhook/channel identity, not proof of POST permissions; real Discord acceptance is separate.
+
+## Bounded transport recovery (first M1c slice)
+
+Real staging acceptance still lacks credentials. Keep it pending while building the next
+independent reliability slice; no provider connection, real webhook POST or demo data is used.
+
+1. Write scalar-clock contract tests for a lifetime retry cap, capped exponential jittered
+   backoff, sustained-health backoff reset, correlated ping/pong deadlines and adaptive create
+   liveness. Application silence is suspicion only; it must not trigger an unprobed reconnect.
+2. Integrate opt-in recovery after definitive transport failures. Default retry count remains
+   zero. Drop the old socket before retrying; all recovery subscriptions are free-only. Paid
+   interruption consumes unused reservations and cannot resume in the same run. Auth/429 stop.
+3. Separate matching-pong/transport-idle liveness from create-stream EWMA, suppress staging
+   admission while application liveness is suspected, and reset histories on real disconnects.
+   Expose classifications, retries, backoff and liveness in capture/health without secrets.
+4. Local WebSocket fault drills prove paid teardown, duplicate/reserve reset, bounded retry
+   exhaustion, refusal after auth/rate-limit rejection, traffic-without-pong timeout and prompt
+   cancellation during backoff. Then run complete checks, document limits and push a PR.
+
+This is not the full M1c supervisor/probe/heal milestone. Three-mint independent probes, RPC gap
+healing, task-panic supervision, heartbeat and storage checkpoints remain separate. Quiet-market
+or application-stall suspicion never fabricates a gap or heals missing data in this slice.

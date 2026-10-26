@@ -35,3 +35,9 @@ before POST; ambiguous outcomes never retry. Honor freshness, rolling attention 
 pauses. Bounded nonblocking admission and serialized sends are required. Artificial inputs stay
 inside isolated tests; no demo stream or test notification is supplied by the application.
 Production delivery remains disabled and real Discord/provider acceptance is reported separately.
+
+Bounded recovery is opt-in and never restores interrupted paid subscriptions. Retry credits
+are finite for the whole run; sustained health can reset backoff, not those credits. Matching
+pong deadlines are independent of data traffic. Application silence is suspected/unprobed and
+suppresses fresh delivery; it must not cause an unprobed reconnect or fabricated gap heal.
+Durable spend/receipt workers retain process ownership until pending writes complete.

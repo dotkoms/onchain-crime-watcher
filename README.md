@@ -7,7 +7,8 @@ built from scratch.
 currently deferred. Default startup reports waiting for data; no demo trades or signals are
 supplied. Recorded captures and optional live volume previews use the same volume core.
 Product contract: scope revision 6. The staging sender is implemented behind explicit opt-in;
-real provider/Discord acceptance and production evidence remain pending.**
+real provider/Discord acceptance and production evidence remain pending. Bounded transport
+recovery is prepared behind an opt-in configuration; full M1c hardening is still pending.**
 
 The contract is [SCOPE.md](SCOPE.md). The review that reshaped it is [REVIEW.md](REVIEW.md), the
 public projects it was checked against are catalogued in [docs/references.md](docs/references.md),
@@ -44,7 +45,9 @@ prints volume previews only when explicitly enabled and real observed data passe
 It posts staging alerts only with the separate `--enable-staging-delivery` opt-in and configured
 staging webhook/channel. Default operation and recorded replay never send. See
 [staging delivery](docs/staging-delivery.md) for setup, budgets, retry semantics and pending live
-acceptance. Production delivery and later signal families below remain the product plan.
+acceptance. Optional [bounded recovery](docs/recovery.md) preserves free-only reconnects and
+separates transport health from suspected application stalls. Production delivery and later
+signal families below remain the product plan.
 
 ## Signals
 

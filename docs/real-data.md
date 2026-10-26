@@ -89,8 +89,9 @@ billing cap. Default capture needs 2 GiB of free disk and retains a separate 2 G
 2. A staging Discord signal channel/webhook and real delivery acceptance. The staging sender is
    implemented with local expiry/rate/budget/ambiguous-POST tests; write permissions and a real
    live staged alert still need verification. The minimal outage sender stays separate.
-3. M1c reconnect/watchdog/heal and supervision, fault drills, and measured runtime resource use
-   before unattended deployment. No automatic restart loop for the current collector.
+3. Finish M1c independent probing/heal, supervision, heartbeat and measured runtime resource use
+   before unattended deployment. [Bounded transport recovery](recovery.md) is implemented but
+   off by default; it does not complete M1c or authorize an application restart loop.
 4. CTO, bundle and wallet families remain later scope milestones. Production volume delivery
    still needs the M2b evidence/backtest gate; passing unit tests does not satisfy that gate.
 

@@ -1,7 +1,8 @@
 use crate::{
     collector::{Pipeline, Secrets, wall_ms},
     config::Config,
-    health::{inc, set, set_state},
+    health::{inc, set, set_state, value},
+    recovery::{CreateWatchdog, Heartbeat, RetryPolicy},
     spend::Ledger,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -16,10 +17,54 @@ use tokio_tungstenite::{
 };
 use url::Url;
 
+#[derive(Clone, Copy)]
+enum Fault {
+    Connect,
+    ConnectTimeout,
+    Write,
+    Closed,
+    Transport,
+    Protocol,
+    Idle,
+    Pong,
+    Authentication,
+    RateLimited,
+}
+impl Fault {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::ConnectTimeout => "connect_timeout",
+            Self::Write => "write",
+            Self::Closed => "closed",
+            Self::Transport => "transport",
+            Self::Protocol => "protocol",
+            Self::Idle => "idle_timeout",
+            Self::Pong => "pong_timeout",
+            Self::Authentication => "authentication",
+            Self::RateLimited => "provider_rate_limit",
+        }
+    }
+    fn terminal(self) -> bool {
+        matches!(self, Self::Authentication | Self::RateLimited)
+    }
+}
 enum End {
     Budget,
     Window,
-    Failure,
+    Failure(Fault),
+}
+struct Exit {
+    end: End,
+    healthy_ms: u64,
+}
+impl Exit {
+    fn failed(fault: Fault) -> Self {
+        Self {
+            end: End::Failure(fault),
+            healthy_ms: 0,
+        }
+    }
 }
 struct Budget {
     ledger: Arc<Mutex<Ledger>>,
@@ -40,7 +85,9 @@ impl Budget {
             return Ok(true);
         }
         let ledger = self.ledger.clone();
+        let ownership = pipeline.ownership.clone();
         let (grant, reserved) = tokio::task::spawn_blocking(move || {
+            let _ownership = ownership;
             let mut ledger = ledger.lock().map_err(|_| "spend ledger lock failed")?;
             let grant = ledger
                 .reserve(day)
@@ -101,12 +148,13 @@ pub(crate) async fn live(
         }
     }
     let mut paid = budget.is_some();
+    let mut retry = RetryPolicy::new(&config.recovery, wall_ms() ^ u64::from(std::process::id()));
     loop {
         pipeline.decoder.reset_session();
         pipeline.reset_volume();
         pipeline.generation += 1;
         set(&pipeline.health.generation, pipeline.generation);
-        let end = one(
+        let exit = one(
             config,
             pipeline,
             secrets,
@@ -114,27 +162,77 @@ pub(crate) async fn live(
             if paid { budget.as_mut() } else { None },
         )
         .await;
-        match end {
+        match exit.end {
+            End::Failure(fault) => {
+                set_state(&pipeline.health.feed_state, "reconnecting");
+                set_state(&pipeline.health.transport_state, "failed");
+                set_state(&pipeline.health.last_failure, fault.label());
+                if matches!(fault, Fault::Pong | Fault::Idle | Fault::ConnectTimeout) {
+                    inc(&pipeline.health.transport_timeouts);
+                }
+                pipeline.decoder.reset_session();
+                pipeline.reset_volume();
+                pipeline.control(
+                    "transport_gap",
+                    serde_json::json!({"class":fault.label(),"healed":false}),
+                );
+                if paid {
+                    paid = false;
+                    budget = None;
+                    set_state(&pipeline.health.paid_state, "interrupted");
+                    pipeline.control(
+                        "paid_stream_stopped",
+                        serde_json::json!({"reason":"interrupted","replacement":"free-only"}),
+                    );
+                }
+                let delay = if fault.terminal() {
+                    None
+                } else {
+                    retry.next(exit.healthy_ms)
+                };
+                let Some(delay) = delay else {
+                    let reason = if fault.terminal() {
+                        fault.label()
+                    } else if config.recovery.reconnect_attempts == 0 {
+                        "disabled"
+                    } else {
+                        inc(&pipeline.health.recovery_exhausted);
+                        "budget_exhausted"
+                    };
+                    let event = serde_json::json!({"event":"recovery_stopped","reason":reason,"class":fault.label()});
+                    pipeline.control("recovery_stopped", event.clone());
+                    println!("{event}");
+                    set_state(&pipeline.health.feed_state, "failed");
+                    return Err("feed connection ended (endpoint and credentials redacted)".into());
+                };
+                set(&pipeline.health.backoff_ms, delay);
+                set_state(&pipeline.health.transport_state, "backoff");
+                pipeline.control(
+                    "reconnect_scheduled",
+                    serde_json::json!({"delay_ms":delay,"subscription":"free-only"}),
+                );
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                set(&pipeline.health.backoff_ms, 0);
+                inc(&pipeline.health.reconnects);
+                continue;
+            }
             End::Budget => {
                 inc(&pipeline.health.budget_stops);
                 set_state(&pipeline.health.paid_state, "exhausted");
             }
             End::Window => set_state(&pipeline.health.paid_state, "window_ended"),
-            End::Failure => {
-                set_state(&pipeline.health.feed_state, "failed");
-                return Err("feed connection ended (endpoint and credentials redacted)".into());
-            }
         }
         if !paid {
             return Ok(());
         }
         paid = false;
+        budget = None;
         pipeline.reset_volume();
         pipeline.control(
             "paid_stream_stopped",
             serde_json::json!({"replacement":"free-only"}),
         );
-        // `one` has returned and dropped its socket before this next connection is attempted.
+        // `one` dropped its socket before the next connection can be attempted.
     }
 }
 
@@ -144,98 +242,198 @@ async fn one(
     secrets: &Secrets,
     endpoint: &Url,
     mut budget: Option<&mut Budget>,
-) -> End {
+) -> Exit {
     let mut url = endpoint.clone();
     if let Some(key) = &secrets.api_key {
         url.query_pairs_mut().append_pair("api-key", key);
     }
-    let timeout_ms = Duration::from_millis(config.feed.connect_timeout_ms);
+    let io_timeout = Duration::from_millis(config.feed.connect_timeout_ms);
     let ws_config = WebSocketConfig::default()
         .max_message_size(Some(config.feed.max_frame_bytes))
         .max_frame_size(Some(config.feed.max_frame_bytes));
     set_state(&pipeline.health.feed_state, "connecting");
+    set_state(&pipeline.health.transport_state, "connecting");
+    set_state(&pipeline.health.application_state, "awaiting_create");
+    set(&pipeline.health.create_received_ms, 0);
+    set(&pipeline.health.create_ewma_ms, 0);
+    set(&pipeline.health.create_threshold_ms, 30_000);
     pipeline.control("session_connecting", serde_json::json!({}));
-    let Ok(Ok((mut socket, _))) = timeout(
-        timeout_ms,
+    let mut socket = match timeout(
+        io_timeout,
         connect_async_with_config(url.as_str(), Some(ws_config), true),
     )
     .await
-    else {
-        return End::Failure;
+    {
+        Ok(Ok((socket, _))) => socket,
+        Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response))) => {
+            return Exit::failed(match response.status().as_u16() {
+                401 | 403 => Fault::Authentication,
+                429 => Fault::RateLimited,
+                _ => Fault::Connect,
+            });
+        }
+        Ok(Err(_)) => return Exit::failed(Fault::Connect),
+        Err(_) => return Exit::failed(Fault::ConnectTimeout),
     };
     for method in ["subscribeNewToken", "subscribeMigration"] {
         let command = serde_json::json!({"method":method});
         if !matches!(
             timeout(
-                timeout_ms,
+                io_timeout,
                 socket.send(Message::Text(command.to_string().into()))
             )
             .await,
             Ok(Ok(()))
         ) {
-            return End::Failure;
+            return Exit::failed(Fault::Write);
         }
         pipeline.control("subscription", command);
     }
     if budget.is_some() {
         let Some(mint) = &config.feed.mint else {
-            return End::Failure;
+            return Exit::failed(Fault::Protocol);
         };
         let command = serde_json::json!({"method":"subscribeTokenTrade","keys":[mint]});
         if !matches!(
             timeout(
-                timeout_ms,
+                io_timeout,
                 socket.send(Message::Text(command.to_string().into()))
             )
             .await,
             Ok(Ok(()))
         ) {
-            return End::Failure;
+            return Exit::failed(Fault::Write);
         }
         pipeline.control("subscription", command);
         set_state(&pipeline.health.paid_state, "observing_one_mint");
     }
+    set(&pipeline.health.backoff_ms, 0);
     set_state(&pipeline.health.feed_state, "connected");
+    set_state(&pipeline.health.transport_state, "connected");
     pipeline.control("session_open", serde_json::json!({"paid":budget.is_some()}));
-    let expires = Instant::now() + Duration::from_secs(config.feed.paid_window_s);
-    let mut last_receive = Instant::now();
+    let opened = Instant::now();
+    let expires = opened + Duration::from_secs(config.feed.paid_window_s);
+    let mut last_receive = opened;
+    let mut healthy_since = opened;
+    let mut heartbeat = Heartbeat::default();
+    let mut app = CreateWatchdog::default();
     let mut ping = tokio::time::interval_at(
-        Instant::now() + Duration::from_secs(20),
-        Duration::from_secs(20),
+        opened + Duration::from_millis(config.recovery.ping_interval_ms),
+        Duration::from_millis(config.recovery.ping_interval_ms),
     );
-    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut volume_tick = tokio::time::interval(Duration::from_secs(1));
-    volume_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let end = loop {
         if let Some(b) = &mut budget
             && !matches!(b.refill(pipeline).await, Ok(true))
         {
             break End::Budget;
         }
-        tokio::select! {
-            _=volume_tick.tick()=>pipeline.tick_volume(),
+        let pong_deadline = heartbeat
+            .deadline()
+            .map(|ms| opened + Duration::from_millis(ms));
+        tokio::select! {biased;
+            _=tokio::time::sleep_until(pong_deadline.unwrap_or(opened)),if pong_deadline.is_some()=>break End::Failure(Fault::Pong),
+            _=tokio::time::sleep_until(last_receive+Duration::from_millis(config.recovery.transport_idle_ms))=>break End::Failure(Fault::Idle),
+            _=tokio::time::sleep_until(expires),if budget.is_some()=>break End::Window,
+            _=tick.tick()=>{
+                if observe_application(&mut app,pipeline,elapsed_ms(opened)) {healthy_since=Instant::now();}
+                pipeline.tick_volume();
+            },
+            _=ping.tick()=>{
+                if heartbeat.deadline().is_none() {
+                    let payload=heartbeat.sent(elapsed_ms(opened),config.recovery.pong_timeout_ms);
+                    let until=opened+Duration::from_millis(heartbeat.deadline().expect("just created ping deadline"));
+                    if !matches!(tokio::time::timeout_at(until.min(Instant::now()+io_timeout),socket.send(Message::Ping(payload.to_vec().into()))).await,Ok(Ok(()))) {
+                        break End::Failure(Fault::Write);
+                    }
+                }
+            },
             frame=socket.next()=>{
-                last_receive=Instant::now();
+                if frame.as_ref().is_some_and(Result::is_ok) {
+                    last_receive=Instant::now();set(&pipeline.health.transport_received_ms,wall_ms());
+                }
                 match frame {
                     Some(Ok(message @ (Message::Text(_)|Message::Binary(_))))=>{
                         let bytes=message.into_data();
-                        if budget.is_some() && billable(&bytes) {inc(&pipeline.health.billable_received);if let Some(b)=&mut budget {b.credits=b.credits.saturating_sub(1);}}
+                        if budget.is_some() && billable(&bytes) {
+                            inc(&pipeline.health.billable_received);
+                            if let Some(b)=&mut budget {b.credits=b.credits.saturating_sub(1);}
+                        }
+                        let creates=value(&pipeline.health.creates);
                         pipeline.ingest(bytes);
+                        if value(&pipeline.health.creates)>creates {
+                            let first=!app.seen();
+                            let recovered=app.observe(elapsed_ms(opened));
+                            if recovered {inc(&pipeline.health.app_recoveries);}
+                            if first || recovered {healthy_since=Instant::now();}
+                            set(&pipeline.health.create_received_ms,wall_ms());
+                            observe_application(&mut app,pipeline,elapsed_ms(opened));
+                        }
                     },
-                    Some(Ok(Message::Ping(_)))=>{if socket.flush().await.is_err() {break End::Failure;}},
-                    Some(Ok(Message::Pong(_)))=>{},
-                    Some(Ok(_))|Some(Err(_))|None=>break End::Failure,
+                    Some(Ok(Message::Ping(_)))=>{
+                        let until=heartbeat.deadline().map(|ms|opened+Duration::from_millis(ms)).unwrap_or(Instant::now()+io_timeout);
+                        if !matches!(tokio::time::timeout_at(until.min(Instant::now()+io_timeout),socket.flush()).await,Ok(Ok(()))) {break End::Failure(Fault::Write);}
+                    },
+                    Some(Ok(Message::Pong(bytes)))=>{
+                        if heartbeat.pong(&bytes,elapsed_ms(opened)) {
+                            inc(&pipeline.health.matching_pongs);set(&pipeline.health.last_pong_ms,wall_ms());
+                        }else{inc(&pipeline.health.wrong_pongs);}
+                    },
+                    Some(Ok(Message::Close(_)))|None=>break End::Failure(Fault::Closed),
+                    Some(Ok(_))=>break End::Failure(Fault::Protocol),
+                    Some(Err(_))=>break End::Failure(Fault::Transport),
                 }
             },
-            _=tokio::time::sleep_until(expires),if budget.is_some()=>break End::Window,
-            _=ping.tick()=>{if !matches!(timeout(timeout_ms,socket.send(Message::Ping(Default::default()))).await,Ok(Ok(()))) {break End::Failure;}},
-            _=tokio::time::sleep_until(last_receive+Duration::from_secs(60))=>break End::Failure,
         }
     };
+    let healthy_ms = if app.seen() && !app.check(elapsed_ms(opened)) {
+        elapsed_ms(healthy_since)
+    } else {
+        0
+    };
+    set_state(&pipeline.health.feed_state, "closing");
     let _ = timeout(Duration::from_secs(1), socket.close(None)).await;
-    pipeline.control("session_close",serde_json::json!({"reason":match end {End::Budget=>"budget",End::Window=>"window",End::Failure=>"transport"}}));
-    end
+    pipeline.control("session_close",serde_json::json!({"reason":match end {End::Budget=>"budget",End::Window=>"window",End::Failure(fault)=>fault.label()}}));
+    Exit { end, healthy_ms }
 }
+fn elapsed_ms(opened: Instant) -> u64 {
+    opened.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+fn observe_application(app: &mut CreateWatchdog, pipeline: &mut Pipeline, now: u64) -> bool {
+    let suspected = app.check(now);
+    let was = pipeline
+        .health
+        .application_state
+        .lock()
+        .is_ok_and(|state| *state == "suspected_unprobed");
+    if suspected && !was {
+        inc(&pipeline.health.app_suspicions);
+        pipeline.control(
+            "application_liveness",
+            serde_json::json!({"state":"suspected_unprobed","action":"suppress_only"}),
+        );
+    }
+    set_state(
+        &pipeline.health.application_state,
+        if suspected {
+            "suspected_unprobed"
+        } else if app.seen() {
+            "observed"
+        } else {
+            "awaiting_create"
+        },
+    );
+    set_state(
+        &pipeline.health.feed_state,
+        if suspected { "suspected" } else { "connected" },
+    );
+    set(&pipeline.health.create_ewma_ms, app.ewma());
+    set(&pipeline.health.create_threshold_ms, app.threshold());
+    suspected
+}
+
 fn billable(bytes: &[u8]) -> bool {
     let value: Result<serde_json::Value, _> = serde_json::from_slice(bytes);
     !matches!(
@@ -248,17 +446,4 @@ fn billable(bytes: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn credits_from_yesterday_cannot_cross_into_a_new_daily_allowance() {
-        let mut credits = 3;
-        let mut day = 10;
-        super::advance_day(&mut credits, &mut day, 11);
-        assert_eq!(credits, 0);
-        assert_eq!(day, 11);
-        credits = 2;
-        super::advance_day(&mut credits, &mut day, 9);
-        assert_eq!(credits, 2);
-        assert_eq!(day, 11);
-    }
-}
+mod tests;

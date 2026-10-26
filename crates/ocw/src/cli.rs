@@ -17,6 +17,7 @@ struct Cli {
     status: bool,
     json: bool,
     preview_volume: bool,
+    staging_delivery: bool,
     paid: bool,
     dry: bool,
     check: bool,
@@ -30,7 +31,7 @@ fn parse() -> Result<Option<Cli>, String> {
         match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "ocw [--status]                               Waiting-for-data status (default)\nocw --replay-capture <segment.ocwcap> [--json] Recorded real frames and volume previews\nocw --config <file> --fixture <raw-JSONL>     Recorded frame inspection\nocw --live --config <file> [--run-for-secs N] [--enable-paid] [--preview-volume]\nocw --config <file> --dry | --check-config | --init-spend-ledger\nocw --inspect-capture <segment.ocwcap>\nNetworking requires --live. No sample data or generated signals are supplied.\nPaid mode requires one feed.mint, OCW_PUMPPORTAL_KEY and an explicitly initialized ledger.\nVolume cards are previews only; Discord signal delivery is not enabled."
+                    "ocw [--status]                               Waiting-for-data status (default)\nocw --replay-capture <segment.ocwcap> [--json] Recorded real frames and volume previews\nocw --config <file> --fixture <raw-JSONL>     Recorded frame inspection\nocw --live --config <file> [--run-for-secs N] [--enable-paid] [--preview-volume] [--enable-staging-delivery]\nocw --config <file> --dry | --check-config | --init-spend-ledger\nocw --inspect-capture <segment.ocwcap>\nNetworking requires --live. No sample data or generated signals are supplied.\nPaid mode requires one feed.mint, OCW_PUMPPORTAL_KEY and an explicitly initialized ledger.\nStaging delivery requires its explicit flag, OCW_DISCORD_STAGING_URL and delivery.staging_channel_id. Production delivery remains disabled."
                 );
                 return Ok(None);
             }
@@ -48,6 +49,7 @@ fn parse() -> Result<Option<Cli>, String> {
             "--live" => cli.live = true,
             "--status" => cli.status = true,
             "--preview-volume" => cli.preview_volume = true,
+            "--enable-staging-delivery" => cli.staging_delivery = true,
             "--json" => cli.json = true,
             "--inspect-capture" => {
                 cli.inspect = Some(
@@ -110,6 +112,9 @@ fn parse() -> Result<Option<Cli>, String> {
     if cli.json && cli.replay.is_none() {
         return Err("--json is only valid for capture replay".into());
     }
+    if cli.staging_delivery && !cli.live {
+        return Err("--enable-staging-delivery requires explicit --live".into());
+    }
     if cli.preview_volume && !cli.live {
         return Err(
             "--preview-volume requires --live; capture replay evaluates volume automatically"
@@ -140,7 +145,7 @@ async fn execute(cli: Cli) -> Result<(), String> {
             println!(
                 "{}",
                 json!({"state":"waiting_for_data","provider_connected":false,
-                "trades":0,"last_trade_ms":null,"alerts_sent":0,"signals_enabled":false,
+                "trades":0,"last_trade_ms":null,"alerts_sent":0,"signals_enabled":false,"staging_delivery_enabled":false,
                 "network":"disabled; requires explicit --live","data":"none; no sample data"})
             );
             return Ok(());
@@ -154,7 +159,7 @@ async fn execute(cli: Cli) -> Result<(), String> {
                     out,
                     "{}",
                     json!({"event":"volume_decision","source":"recorded_capture",
-                    "decision":decision,"preview":preview})
+                    "decision":decision,"preview":preview,"staging_payload":ocw_core::delivery::staging_payload(decision,now)})
                 )
                 .map_err(|_| "cannot write preview")?;
             } else if let Some(card) = preview {
@@ -228,7 +233,8 @@ async fn execute(cli: Cli) -> Result<(), String> {
     }
     let options = Options {
         paid: cli.paid,
-        preview_volume: cli.preview_volume,
+        preview_volume: cli.preview_volume || cli.staging_delivery,
+        staging_delivery: cli.staging_delivery,
         fixture: cli.fixture,
         run_for: cli.seconds.map(Duration::from_secs),
     };

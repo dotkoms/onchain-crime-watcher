@@ -4,40 +4,20 @@ use std::time::Duration;
 use url::Url;
 
 pub(crate) fn webhook_url(raw: &str) -> Result<Url, String> {
-    let mut url = Url::parse(raw).map_err(|_| "invalid OCW_DISCORD_STATUS_URL")?;
-    let segments = url
-        .path_segments()
-        .map(|s| s.collect::<Vec<_>>())
-        .unwrap_or_default();
-    if url.scheme() != "https"
-        || url.host_str() != Some("discord.com")
-        || url.port().is_some_and(|p| p != 443)
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || segments.len() != 4
-        || segments[..2] != ["api", "webhooks"]
-        || segments[2].parse::<u64>().is_err()
-        || segments[3].is_empty()
-    {
-        return Err("OCW_DISCORD_STATUS_URL must be a Discord HTTPS webhook URL".into());
-    }
-    url.query_pairs_mut().append_pair("wait", "true");
-    Ok(url)
+    crate::discord::webhook_url(raw)
 }
 
-pub(crate) async fn notify(raw: Option<&str>, health: &Health) {
+pub(crate) async fn notify(raw: Option<&str>, health: &Health, pause: &crate::discord::Pause) {
     let Some(raw) = raw else { return };
+    if !pause.remaining().is_zero() {
+        inc(&health.outage_unknown);
+        return;
+    }
     let Ok(url) = webhook_url(raw) else {
         inc(&health.outage_unknown);
         return;
     };
-    let Ok(client) = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(5))
-        .build()
-    else {
+    let Ok(client) = crate::discord::client(Duration::from_secs(5)) else {
         inc(&health.outage_unknown);
         return;
     };
@@ -45,7 +25,7 @@ pub(crate) async fn notify(raw: Option<&str>, health: &Health) {
 }
 
 async fn send(client: &reqwest::Client, url: Url, health: &Health) {
-    let payload = json!({"content":"OCW trade stream unavailable. M1a collector; single-source, unverified. No signal alerts are enabled.","allowed_mentions":{"parse":[]}});
+    let payload = json!({"content":"OCW trade stream unavailable. Collection stopped; data incomplete. Signal delivery is paused.","allowed_mentions":{"parse":[]}});
     let result = async {
         let mut response = client
             .post(url)

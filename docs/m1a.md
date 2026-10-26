@@ -2,8 +2,8 @@
 
 One Rust binary and library. The collector subscribes to free create/migration streams and,
 only with `--enable-paid`, one configured mint for a bounded observation window. It does not
-post volume, CTO or wallet signals. An opt-in volume preview core is now available; see
-[real-data.md](real-data.md). Live M1b acceptance and M1c remain separate work.
+post volume, CTO or wallet signals by default. Opt-in volume processing and staging delivery are
+now available; see [real-data.md](real-data.md) and [staging-delivery.md](staging-delivery.md). Live M1b acceptance and M1c remain separate work.
 
 ## Commands
 

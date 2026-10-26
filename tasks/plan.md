@@ -42,3 +42,25 @@ acceptance remains incomplete, not waived or marked passed.
 Risks: tests cannot validate thresholds or provider completeness; cohort estimates cover a bounded
 observed sample only; gaps re-warm instead of fabricating quiet volume. A capture segment missing
 its launch/baseline cannot produce a confident alert. Existing paid/capture safeguards remain.
+
+## Staging Discord volume sender
+
+This extends the real-data path. Default startup, replay and previews stay disconnected from
+Discord. No demo data or real external POSTs are used during implementation.
+
+1. Contract tests for fresh/safe staging payloads, bounded priority queue, 5-second near hold,
+   15/30-second expiry, rolling hour/day attention limits and reserved fire capacity.
+2. Durable, bounded pre-send intent/budget journal and returned message IDs. Ambiguous outcomes
+   remain consumed and never retry. Check restart, corrupt state, rollback and disk failures.
+3. HTTPS webhook transport: exact Discord host, redirects and automatic retries disabled,
+   bounded response/timeouts, wait=true, mention suppression, target-channel readiness GET,
+   429/header pauses and permanent failure breaker. Prove behavior against localhost servers.
+4. Nonblocking real-live admission and serialized sender worker; separate staging flag and
+   environment webhook. Replay cannot send. Surface outcomes in health, cancel pending work on
+   feed generation changes, bound shutdown and respect shared global Discord pauses.
+5. Runbook and verification evidence; fmt, Clippy, tests, build and audit; commit/push a PR.
+
+Defaults: 10/hour and 40/rolling-day volume attempts, burst two with six-minute refill, near at
+most 30% of each budget, two hourly slots reserved for fire. Failed/unknown attempts consume
+capacity conservatively. Staging is labelled; production remains gated. Readiness GET checks
+webhook/channel identity, not proof of POST permissions; real Discord acceptance is separate.

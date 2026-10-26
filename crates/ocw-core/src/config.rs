@@ -9,6 +9,30 @@ pub struct Config {
     pub feed: FeedConfig,
     pub gate: GateConfig,
     pub capture: CaptureConfig,
+    pub delivery: DeliveryConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DeliveryConfig {
+    pub staging_channel_id: Option<String>,
+    pub queue_capacity: usize,
+    pub hourly_cap: u64,
+    pub daily_cap: u64,
+    pub burst: u64,
+    pub request_timeout_ms: u64,
+}
+impl Default for DeliveryConfig {
+    fn default() -> Self {
+        Self {
+            staging_channel_id: None,
+            queue_capacity: 64,
+            hourly_cap: 10,
+            daily_cap: 40,
+            burst: 2,
+            request_timeout_ms: 2000,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -47,6 +71,7 @@ impl Default for Config {
             feed: FeedConfig::default(),
             gate: GateConfig::default(),
             capture: CaptureConfig::default(),
+            delivery: DeliveryConfig::default(),
         }
     }
 }
@@ -93,6 +118,18 @@ impl Config {
         let f = &self.feed;
         let c = &self.capture;
         let g = &self.gate;
+        let d = &self.delivery;
+        if !(1..=64).contains(&d.queue_capacity)
+            || !(2..=10).contains(&d.hourly_cap)
+            || !(1..=40).contains(&d.daily_cap)
+            || !(1..=2).contains(&d.burst)
+            || !(100..=2000).contains(&d.request_timeout_ms)
+            || d.staging_channel_id
+                .as_ref()
+                .is_some_and(|id| id.parse::<u64>().ok().filter(|v| *v > 0).is_none())
+        {
+            return Err("delivery limits or staging channel are invalid".into());
+        }
         if !self.health_bind.ip().is_loopback() {
             return Err("health_bind must be loopback in M1a".into());
         }

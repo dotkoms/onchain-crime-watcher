@@ -1,6 +1,8 @@
 pub mod capture;
 pub mod collector;
 pub mod config;
+pub mod delivery;
+mod discord;
 pub mod feed;
 pub mod health;
 mod outage;

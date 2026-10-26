@@ -109,6 +109,7 @@ fn default_start_waits_for_real_data_without_credentials_network_or_disk_writes(
         .current_dir(dir.path())
         .env("OCW_PUMPPORTAL_KEY", "invalid-on-purpose")
         .env("OCW_DISCORD_STATUS_URL", "invalid-on-purpose")
+        .env("OCW_DISCORD_STAGING_URL", "invalid-on-purpose")
         .output()
         .unwrap();
     assert!(
@@ -137,6 +138,13 @@ fn live_flags_require_explicit_live_and_reject_mixed_modes_before_side_effects()
         vec!["--replay-capture", "missing.ocwcap", "--dry"],
         vec!["--preview-volume"],
         vec!["--demo"],
+        vec!["--enable-staging-delivery"],
+        vec!["--dry", "--enable-staging-delivery"],
+        vec![
+            "--replay-capture",
+            "missing.ocwcap",
+            "--enable-staging-delivery",
+        ],
     ] {
         let dir = tempfile::tempdir().unwrap();
         let out = Command::new(env!("CARGO_BIN_EXE_ocw"))
@@ -176,6 +184,7 @@ fn executable_replays_observed_frames_without_credentials_or_invented_signals() 
         .current_dir(dir.path())
         .env("OCW_PUMPPORTAL_KEY", "invalid-on-purpose")
         .env("OCW_DISCORD_STATUS_URL", "invalid-on-purpose")
+        .env("OCW_DISCORD_STAGING_URL", "invalid-on-purpose")
         .args(["--replay-capture", path.to_str().unwrap(), "--json"])
         .output()
         .unwrap();

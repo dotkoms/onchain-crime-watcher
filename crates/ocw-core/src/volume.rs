@@ -25,7 +25,7 @@ pub enum Verdict {
     Fire,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Decision {
     pub number: u64,
     pub mint: String,
@@ -47,6 +47,18 @@ pub struct Decision {
 impl Decision {
     /// Pure preview: never sends HTTP, changes a budget, or claims delivery.
     pub fn card(&self, now_ms: u64) -> Option<Value> {
+        self.formatted_card(now_ms, false)
+    }
+    pub(crate) fn staging_card(&self, now_ms: u64) -> Option<Value> {
+        self.formatted_card(now_ms, true)
+    }
+    fn formatted_card(&self, now_ms: u64, staging: bool) -> Option<Value> {
+        let label = if staging { "STAGING" } else { "PREVIEW" };
+        let footer = if staging {
+            "Thresholds are priors. Staging only."
+        } else {
+            "Thresholds are priors. Not delivered."
+        };
         let ttl = match self.verdict {
             Verdict::Fire => 30_000,
             Verdict::Near => 15_000,
@@ -67,7 +79,7 @@ impl Decision {
         };
         Some(json!({
             "content": format!(
-                "#{} {tier} | Volume anomaly | PREVIEW\nMint: {}\n15 s volume {:.3} SOL | baseline {:.3} SOL | floor {:.3} SOL\n{comparison}\n{} trades | {} takers | largest {:.1}%\nRegime: {} | age {:.1} s\nWatched subset only; coverage unverified. Thresholds are priors. Not delivered.",
+                "#{} {tier} | Volume anomaly | {label}\nMint: {}\n15 s volume {:.3} SOL | baseline {:.3} SOL | floor {:.3} SOL\n{comparison}\n{} trades | {} takers | largest {:.1}%\nRegime: {} | age {:.1} s\nWatched subset only; coverage unverified. {footer}",
                 self.number, self.mint, self.volume_lamports as f64 / SOL, self.baseline_lamports / SOL,
                 self.floor_lamports / SOL, self.trades, self.distinct_takers,
                 self.largest_taker_share * 100.0, self.regime, age as f64 / 1000.0),

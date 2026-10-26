@@ -33,3 +33,13 @@ hourly_cap = 10
 daily_cap = 40
 burst = 2
 request_timeout_ms = 2000
+
+# Reconnect remains off until deliberately configured. Recovery sockets are free-only.
+[recovery]
+reconnect_attempts = 0
+initial_backoff_ms = 1000
+max_backoff_ms = 30000
+healthy_reset_ms = 60000
+ping_interval_ms = 20000
+pong_timeout_ms = 10000
+transport_idle_ms = 60000

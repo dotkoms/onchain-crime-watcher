@@ -23,7 +23,8 @@ This automatically enables the real volume core. Paid data still independently r
 configured mint, provider key, sufficient linked allowance and an explicitly reconciled spend
 ledger. Configure `feed.paid_window_s` deliberately: its default 10 seconds cannot establish the
 four-minute volume baseline. Unknown launch history stays suppressed; no launch time or trades
-are fabricated. The watch/discovery policy and live coverage acceptance remain unfinished.
+are fabricated. The watch/discovery policy and live coverage acceptance remain unfinished. Optional
+[bounded recovery](recovery.md) never resumes interrupted paid subscriptions.
 
 Before the provider connects, the sender GETs the webhook and checks incoming-webhook type,
 webhook ID and exact configured channel ID. Failure stops startup. This checks identity and

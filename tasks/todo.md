@@ -32,3 +32,13 @@ Live acceptance above is deliberately deferred at the user's request, not marked
 - [x] Explicit staging opt-in, live integration, health and safe shutdown.
 - [x] Documentation and complete local checks.
 - [x] Push staging sender review branch (`codex/staging-discord-sender`).
+
+## Bounded transport recovery
+
+- [x] Retry/backoff and independent transport/application liveness contracts.
+- [x] Opt-in free-only reconnection with paid-interruption and auth/429 guards.
+- [x] Local fault drills, history reset, cancellation and health/capture evidence.
+- [x] Complete local checks and runbook.
+- [ ] Push bounded recovery review branch.
+
+Independent probing/heal, full task supervision and real staging acceptance remain pending.

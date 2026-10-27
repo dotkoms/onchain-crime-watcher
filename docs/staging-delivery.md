@@ -131,3 +131,11 @@ retries, global pauses, oversize responses, expiry/generation changes, disk fail
 in flight. Worker integration proves process ownership lasts through the final journal write.
 Default startup ignores even an invalid staging environment value and remains waiting for real
 data; configuration validation succeeds without credentials. No real acceptance is inferred.
+
+## Offline policy verification
+
+With `[history].enabled = true`, new real staging runs record queue and budget decisions,
+payload hashes and normalized transport results. After clean shutdown, use
+`ocw --replay-delivery /private/path/data/history/observations.ocwh --json` to verify those
+policies in memory without HTTP or writes. See [delivery replay](delivery-replay.md) for
+required evidence and the distinction between historical receipts and new sends.

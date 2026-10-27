@@ -13,6 +13,7 @@ struct Cli {
     fixture: Option<PathBuf>,
     replay: Option<PathBuf>,
     analysis_replay: Option<PathBuf>,
+    delivery_replay: Option<PathBuf>,
     inspect: Option<PathBuf>,
     live: bool,
     status: bool,
@@ -33,13 +34,20 @@ fn parse() -> Result<Option<Cli>, String> {
         match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "ocw [--status]                               Waiting-for-data status (default)\nocw --replay-capture <segment.ocwcap> [--json] Recorded real frames and volume previews\nocw --replay-analysis <segment.ocwcap> [--json] Exact recorded analysis steps (new captures)\nocw --config <file> --fixture <raw-JSONL>     Recorded frame inspection\nocw --live --config <file> [--run-for-secs N] [--enable-paid] [--preview-volume] [--enable-staging-delivery]\nocw --config <file> --dry | --check-config | --preflight | --init-spend-ledger\nocw --inspect-capture <segment.ocwcap>\nNetworking requires --live. No sample data or generated signals are supplied.\nPaid mode requires feed.mint or feed.auto_watch, OCW_PUMPPORTAL_KEY and an explicitly initialized ledger.\nStaging delivery requires its explicit flag, OCW_DISCORD_STAGING_URL and delivery.staging_channel_id. Production delivery remains disabled."
+                    "ocw [--status]                               Waiting-for-data status (default)\nocw --replay-capture <segment.ocwcap> [--json] Recorded real frames and volume previews\nocw --replay-analysis <segment.ocwcap> [--json] Exact recorded analysis steps (new captures)\nocw --replay-delivery <observations.ocwh> [--json] Recorded staging policy and outcomes\nocw --config <file> --fixture <raw-JSONL>     Recorded frame inspection\nocw --live --config <file> [--run-for-secs N] [--enable-paid] [--preview-volume] [--enable-staging-delivery]\nocw --config <file> --dry | --check-config | --preflight | --init-spend-ledger\nocw --inspect-capture <segment.ocwcap>\nNetworking requires --live. No sample data or generated signals are supplied.\nPaid mode requires feed.mint or feed.auto_watch, OCW_PUMPPORTAL_KEY and an explicitly initialized ledger.\nStaging delivery requires its explicit flag, OCW_DISCORD_STAGING_URL and delivery.staging_channel_id. Production delivery remains disabled."
                 );
                 return Ok(None);
             }
             "--config" => cli.config = Some(args.next().ok_or("--config requires a path")?.into()),
             "--fixture" => {
                 cli.fixture = Some(args.next().ok_or("--fixture requires a path")?.into())
+            }
+            "--replay-delivery" => {
+                cli.delivery_replay = Some(
+                    args.next()
+                        .ok_or("--replay-delivery requires a path")?
+                        .into(),
+                );
             }
             "--replay-analysis" => {
                 cli.analysis_replay = Some(
@@ -97,6 +105,7 @@ fn parse() -> Result<Option<Cli>, String> {
         cli.fixture.is_some(),
         cli.replay.is_some(),
         cli.analysis_replay.is_some(),
+        cli.delivery_replay.is_some(),
     ]
     .into_iter()
     .filter(|b| *b)
@@ -121,7 +130,11 @@ fn parse() -> Result<Option<Cli>, String> {
     if modes == 0 {
         cli.status = true;
     }
-    if cli.json && cli.replay.is_none() && cli.analysis_replay.is_none() {
+    if cli.json
+        && cli.replay.is_none()
+        && cli.analysis_replay.is_none()
+        && cli.delivery_replay.is_none()
+    {
         return Err("--json is only valid for capture replay".into());
     }
     if cli.staging_delivery && !cli.live && !cli.preflight {
@@ -148,6 +161,15 @@ fn read_config(path: PathBuf) -> Result<Config, String> {
     Config::parse(&text)
 }
 async fn execute(cli: Cli) -> Result<(), String> {
+    if let Some(path) = cli.delivery_replay {
+        if cli.config.is_some() {
+            return Err("delivery replay uses recorded configuration; omit --config".into());
+        }
+        let result = ocw_core::delivery::replay::run(&path)?;
+        println!("{result}");
+        return Ok(());
+    }
+
     if cli.analysis_replay.is_some() && cli.config.is_some() {
         return Err("analysis replay uses its recorded configuration; omit --config".into());
     }

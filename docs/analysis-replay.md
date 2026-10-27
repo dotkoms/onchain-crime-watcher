@@ -44,7 +44,10 @@ redacted billable frames fail instead of guessing. Older captures report this fl
 
 `subscription_transport_replayed:false`,
 `delivery_replayed:false` and `external_responses_replayed:false` make those limits explicit.
-Discord queue/admission/results, durable-write failure response tapes, RPC response tapes and full
-multi-source authority switching are not replayed. Full M2a replay, multi-segment/checkpoint
+Staging-volume queue/admission/results can be checked separately with
+[`--replay-delivery`](delivery-replay.md) when normalized history was enabled. This analysis
+command does not merge those tapes or claim a complete end-to-end backtest. Raw HTTP parsing,
+durable-write failure response tapes, RPC response tapes and full multi-source authority
+switching are not replayed. Full M2a replay, multi-segment/checkpoint
 restart, train/test reports, real seven-day captures and empirical threshold evaluation remain
 pending. No fitted threshold or historical performance result is claimed without that evidence.

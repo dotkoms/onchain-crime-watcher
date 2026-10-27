@@ -281,3 +281,52 @@ fn analysis_replay_refuses_missing_evidence_without_using_present_credentials() 
     assert!(!String::from_utf8_lossy(&output.stderr).contains("private-"));
     assert!(!dir.path().join("data").exists());
 }
+
+#[test]
+fn delivery_replay_is_read_only_ignores_secrets_and_rejects_live_or_configuration_overrides() {
+    use ocw_core::{config::DeliveryConfig, history::Journal};
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("history");
+    let mut journal = Journal::open(&root, 16 * 1024 * 1024, "boot1", 1000).unwrap();
+    for data in [
+        json!({"op":"start","data":{"schema":1,"boot":"boot1","config":DeliveryConfig::default(),"state":{"clock":0,"refilled":0,"tokens":2,"entries":[]}}}),
+        json!({"op":"clear","data":{"removed":0}}),
+        json!({"op":"end","data":{}}),
+    ] {
+        journal.append(1000, "delivery_replay", data).unwrap();
+    }
+    journal.sync().unwrap();
+    let path = root.join("observations.ocwh");
+    let before = fs::read(&path).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_ocw"))
+        .current_dir(dir.path())
+        .env("OCW_DISCORD_STAGING_URL", "private-invalid-secret")
+        .args(["--replay-delivery", path.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["delivery_policy_replayed"], true);
+    assert_eq!(report["alerts_sent"], 0);
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("private-invalid-secret"));
+    assert!(!dir.path().join("data").exists());
+    assert_eq!(before, fs::read(&path).unwrap());
+    for flags in [
+        vec!["--live"],
+        vec!["--config", "missing.toml"],
+        vec!["--enable-staging-delivery"],
+        vec!["--enable-paid"],
+    ] {
+        let result = Command::new(env!("CARGO_BIN_EXE_ocw"))
+            .args(["--replay-delivery", path.to_str().unwrap()])
+            .args(flags)
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+    }
+}

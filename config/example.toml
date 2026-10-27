@@ -59,6 +59,7 @@ timeout_ms = 2000
 # Secrets are environment-only: OCW_DISCORD_STATUS_URL and OCW_DEADMAN_URL.
 
 # Durable normalized observations and explicit coverage gaps. No recovery makes a gap complete.
+# Enable to retain normalized observations and real staging policy replay evidence.
 [history]
 enabled = false
 max_bytes = 536870912

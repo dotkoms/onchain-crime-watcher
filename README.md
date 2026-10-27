@@ -50,7 +50,7 @@ Production delivery remains off while provider coverage, billing, Discord accept
 | Hosting preparation | Offline preflight, Docker/systemd templates and checksummed stopped-process snapshots; nothing deployed. |
 | Local visibility | Loopback health endpoint, spend accounting, connection generations, and failure counters. |
 
-See the [hosting preparation guide](docs/hosting.md) and [history/watch runbook](docs/history.md). See [CTO setup](docs/cto.md) for the independent curated-claim channel. Bundle, wallet, full backtesting and secondary-feed features remain under development.
+See the [hosting preparation guide](docs/hosting.md) and [history/watch runbook](docs/history.md). See [offline delivery replay](docs/delivery-replay.md) to verify recorded staging policies. See [CTO setup](docs/cto.md) for the independent curated-claim channel. Bundle, wallet, full backtesting and secondary-feed features remain under development.
 
 ## Quickstart
 
@@ -133,7 +133,7 @@ Receive time anchors observation. Unknown amounts stay unresolved, capture loss 
 | --- | --- |
 | Collector, volume core, staging sender | Implemented; live provider and Discord acceptance remain pending. |
 | Reliability | Supervision, heartbeat/readiness, opt-in external monitoring, independent RPC probes and bounded audit-only gap healing implemented. Real hosted acceptance remains. |
-| Replay and validation | Exact recorded decoder/volume analysis and automatic watch-controller replay implemented. Spend/transport/delivery replay, historical evaluation and production evidence gates remain. |
+| Replay and validation | Recorded analysis, automatic watch choices, local feed spend, and staging-volume queue/budget/payload replay implemented. Raw response tapes, full end-to-end backtests and historical evaluation remain. |
 | Community takeovers and bundles | Curated CTO polling and partial bundle capture/funding/card integration implemented. Complete transfer/price context and live acceptance remain. |
 | Wallet discovery and exits | Planned. Requires observed positions, cost basis, and coverage-aware accounting. |
 | Secondary provider | Planned. Warm standby and feed comparison are specified, not implemented. |

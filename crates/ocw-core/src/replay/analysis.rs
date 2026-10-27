@@ -1,4 +1,4 @@
-//! Exact application-order decoder/volume replay for execution-schema-1 captures.
+//! Exact application-order decoder/volume replay, with optional watch-schema-1 verification.
 //! Delivery workers and external response tapes are deliberately outside this report's claims.
 use crate::{
     capture,
@@ -30,6 +30,7 @@ pub fn run(
     let mut input_hash = Sha256::new();
     let mut decision_hash = Sha256::new();
     let mut failure = None;
+    let mut controller = super::controller::Controller::default();
     let (_, torn) = capture::scan(path, |record| {
         let result = (|| -> Result<(), String> {
             records += 1;
@@ -95,6 +96,7 @@ pub fn run(
                 } else {
                     None
                 };
+                controller.configure(&value)?;
                 config = Some(initial);
                 return Ok(());
             }
@@ -103,6 +105,16 @@ pub fn run(
             let mut produced = Vec::new();
             let mut applied_now = now;
             match record.kind.as_str() {
+                "watch_start" | "watch_plan" => {
+                    let step: Value = serde_json::from_slice(&record.payload)
+                        .map_err(|_| "invalid watch controller record")?;
+                    if record.kind == "watch_start" {
+                        controller.start(config, &record, &step)?;
+                    } else {
+                        controller.plan(&record, &step, pending.as_ref())?;
+                    }
+                }
+                "session_close" => controller.boundary()?,
                 "boot" => return Err("analysis capture contains a second boot".into()),
                 "frame" => {
                     if pending.is_some() || record.payload.len() > config.feed.max_frame_bytes {
@@ -127,6 +139,7 @@ pub fn run(
                     {
                         return Err("analysis frame application identity mismatch".into());
                     }
+                    controller.frame(&raw, &step, record.kind == "discarded_frame")?;
                     if record.kind == "discarded_frame" {
                         if let Some(engine) = &mut engine {
                             produced = engine.advance(applied_now)?;
@@ -137,7 +150,8 @@ pub fn run(
                             .ok_or("analysis admission flag missing")?;
                         match decoder.decode(&raw.payload, applied_now) {
                             Ok(event) => {
-                                if matches!(event, Event::Trade(_)) {
+                                if let Event::Trade(trade) = &event {
+                                    controller.trade(trade, applied_now);
                                     trades += 1;
                                 }
                                 if let Some(engine) = &mut engine {
@@ -159,6 +173,7 @@ pub fn run(
                 "watch_apply" => {
                     let step: Value = serde_json::from_slice(&record.payload)
                         .map_err(|_| "invalid analysis watch step")?;
+                    controller.apply(&record, &step)?;
                     applied_now = step["apply_ms"]
                         .as_u64()
                         .ok_or("analysis watch clock missing")?;
@@ -214,6 +229,7 @@ pub fn run(
                     }
                 }
                 "pipeline_panic" => {
+                    controller.boundary()?;
                     pending = None;
                     *decoder =
                         Decoder::new(config.feed.dedup_capacity, config.feed.dedup_window_ms);
@@ -253,7 +269,14 @@ pub fn run(
     if torn || pending.is_some() || config.is_none() {
         return Err("analysis capture is torn or has an incomplete execution tail".into());
     }
-    Ok(
-        json!({"event":"analysis_replay_complete","execution_schema":1,"records":records,"frames":frames,"accepted_trades":trades,"watch_operations":subscriptions,"decisions":decisions,"input_sha256":format!("{:x}",input_hash.finalize()),"decision_sha256":format!("{:x}",decision_hash.finalize()),"volume":engine.as_ref().map(Engine::stats),"active_mints":engine.as_ref().map(Engine::active_mints),"alerts_sent":0,"network":"disabled","initial_state":"recorded_cold_boot","delivery_replayed":false,"external_responses_replayed":false,"coverage":"only the supplied uninterrupted capture; provider completeness unverified"}),
-    )
+    controller.complete()?;
+    let mut summary = json!({"event":"analysis_replay_complete","execution_schema":1,"records":records,"frames":frames,"accepted_trades":trades,"watch_operations":subscriptions,"decisions":decisions,"input_sha256":format!("{:x}",input_hash.finalize()),"decision_sha256":format!("{:x}",decision_hash.finalize()),"volume":engine.as_ref().map(Engine::stats),"active_mints":engine.as_ref().map(Engine::active_mints),"alerts_sent":0,"network":"disabled","initial_state":"recorded_cold_boot","delivery_replayed":false,"external_responses_replayed":false,"coverage":"only the supplied uninterrupted capture; provider completeness unverified"});
+    summary.as_object_mut().expect("summary object").extend(
+        controller
+            .summary()
+            .as_object()
+            .expect("controller summary")
+            .clone(),
+    );
+    Ok(summary)
 }

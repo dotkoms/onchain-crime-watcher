@@ -333,6 +333,7 @@ async fn one(
         None
     };
     if planner.is_some() {
+        pipeline.control("watch_start", serde_json::json!({"schema":1}));
         set_state(&pipeline.health.paid_state, "observing_auto");
     }
     if budget.is_some() && planner.is_none() {
@@ -424,6 +425,7 @@ async fn one(
                 if let Some(planner) = &mut planner {
                     let now = pipeline.now_ms();
                     let actions = planner.reconcile(now);
+                    pipeline.control("watch_plan",serde_json::json!({"apply_ms":now,"input_seq":null,"actions":actions}));
                     if !apply_actions(actions, pipeline, &mut socket, now, io_timeout).await {
                         break End::Failure(Fault::Write);
                     }
@@ -477,6 +479,7 @@ async fn one(
                                     .and_then(|s|crate::feed::key::<32>(s).ok());
                                 let mut actions = planner.reconcile(stamp.now_ms);
                                 if kind == Some("create") && let Some(mint) = mint { actions.extend(planner.create(mint,stamp.now_ms)); }
+                                pipeline.control("watch_plan",serde_json::json!({"apply_ms":stamp.now_ms,"input_seq":stamp.input_seq,"actions":actions}));
                                 // Membership is decided before decoding; stale frames cannot mutate
                                 // reserve caches. Raw frames were already captured above.
                                 let active = mint.is_some_and(|key|planner.contains(&key));

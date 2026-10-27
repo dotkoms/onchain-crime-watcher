@@ -464,6 +464,18 @@ async fn automatic_watch_subscribes_on_the_same_socket_and_excludes_inactive_tra
     let discarded = controls(dir.path(), "discarded_frame");
     assert_eq!(discarded.len(), 1);
     assert_eq!(discarded[0]["reason"], "inactive_subscription");
+    let paths: Vec<_> = std::fs::read_dir(dir.path().join("data/capture"))
+        .unwrap()
+        .flat_map(|day| std::fs::read_dir(day.unwrap().path()).unwrap())
+        .map(|file| file.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "ocwcap"))
+        .collect();
+    assert_eq!(paths.len(), 1);
+    let replay = crate::replay::analysis::run(&paths[0], |_, _| Ok(())).unwrap();
+    assert_eq!(replay["watch_controller_replayed"], true);
+    assert_eq!(replay["accepted_trades"], 1);
+    assert!(replay["watch_plans"].as_u64().unwrap() >= 3);
+
     assert_eq!(controls(dir.path(), "watch_admitted").len(), 1);
     let mut replays = Vec::new();
     for day in std::fs::read_dir(dir.path().join("data/capture")).unwrap() {

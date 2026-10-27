@@ -44,7 +44,8 @@ impl Config {
         Ok(())
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Action {
     Subscribe {
         mint: [u8; 32],

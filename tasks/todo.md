@@ -110,7 +110,8 @@ Recorded analysis execution increment:
 - [x] Record exact frame application, watch operations, timer ticks and volume reset clocks.
 - [x] Read-only cold-prefix decoder/volume replay with deterministic input/decision hashes.
 - [x] Reject missing execution evidence; preserve observed admission and exclude healed audit batches.
-- [ ] Replay controller choices, delivery admission/results and external response tapes.
+- [x] Recompute automatic watch-controller choices and verify applied membership against recorded frames/timers.
+- [ ] Replay spend admission, subscription transport, delivery admission/results and external response tapes.
 - [ ] Multi-segment/checkpoint replay and real historical train/test threshold evaluation.
 
 See [analysis replay](../docs/analysis-replay.md); this is not a complete delivery backtest.

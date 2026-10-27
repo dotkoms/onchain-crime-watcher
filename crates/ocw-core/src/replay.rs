@@ -1,5 +1,5 @@
 //! Stream a recorded OCWC capture through the real decoder and volume engine.
-//! This preserves receive timing; it is not complete M2a controller/delivery replay.
+//! Diagnostic receive-timing replay; the analysis module additionally verifies recorded watch choices.
 use crate::{
     capture,
     config::FeedConfig,
@@ -118,3 +118,5 @@ pub fn run(
 }
 
 pub mod analysis;
+
+mod controller;

@@ -133,7 +133,7 @@ Receive time anchors observation. Unknown amounts stay unresolved, capture loss 
 | --- | --- |
 | Collector, volume core, staging sender | Implemented; live provider and Discord acceptance remain pending. |
 | Reliability | Supervision, heartbeat/readiness, opt-in external monitoring, independent RPC probes and bounded audit-only gap healing implemented. Real hosted acceptance remains. |
-| Replay and validation | Exact recorded decoder/volume analysis replay implemented. Controller/delivery replay, historical evaluation and production evidence gates remain. |
+| Replay and validation | Exact recorded decoder/volume analysis and automatic watch-controller replay implemented. Spend/transport/delivery replay, historical evaluation and production evidence gates remain. |
 | Community takeovers and bundles | Curated CTO polling and partial bundle capture/funding/card integration implemented. Complete transfer/price context and live acceptance remain. |
 | Wallet discovery and exits | Planned. Requires observed positions, cost basis, and coverage-aware accounting. |
 | Secondary provider | Planned. Warm standby and feed comparison are specified, not implemented. |

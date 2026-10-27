@@ -21,9 +21,23 @@ fail. An arbitrary rotated segment cannot be reconstructed from empty state. Old
 remain available through the narrower `--replay-capture` diagnostic command; no execution
 records are invented to upgrade them.
 
-The summary includes deterministic input/decision hashes and states `delivery_replayed:false`
-and `external_responses_replayed:false`. It verifies recorded analysis execution, not the
-independent subscription controller, Discord queue/admission/results, RPC response tapes or
-whole-provider coverage. Full M2a replay, multi-segment/checkpoint restart, train/test reports,
-real seven-day captures and empirical threshold evaluation remain pending. No fitted threshold
-or historical performance result is claimed without that evidence.
+New live captures also declare `watch_schema: 1`. For paid automatic watching, the session
+records a cold controller start and every frame/timer planning step, including empty action
+lists. Replay runs the production watch planner against recorded raw creates and decoded
+trades, compares its ordered actions with the capture, and checks that watch attachment/removal
+and frame admission follow those actions. Inactive trade discards must match membership.
+Session boundaries clear controller state; incomplete planning/application tails fail.
+
+The summary includes deterministic input, volume-decision and watch-decision hashes,
+`watch_plans` and `watch_sessions`. `watch_controller_replayed:true` means at least one automatic
+watch session was recomputed from that evidence. Older captures without `watch_schema` retain
+analysis replay and report this flag false; missing evidence is not invented. Free-only and
+manual-mint sessions do not claim automatic-controller verification.
+
+This verifies desired subscription choices, not successful upstream subscription delivery or
+billing. `financial_admission_replayed:false`, `subscription_transport_replayed:false`,
+`delivery_replayed:false` and `external_responses_replayed:false` make those limits explicit.
+Discord queue/admission/results, durable spend response tapes, RPC response tapes and full
+multi-source authority switching are not replayed. Full M2a replay, multi-segment/checkpoint
+restart, train/test reports, real seven-day captures and empirical threshold evaluation remain
+pending. No fitted threshold or historical performance result is claimed without that evidence.

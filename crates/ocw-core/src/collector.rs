@@ -725,7 +725,7 @@ async fn run_inner(
         last_trade: None,
         rpc,
     };
-    pipeline.control("boot",json!({"config":config,"mode":if options.fixture.is_some(){"fixture"}else{"live"},"initial_state":"cold","decoder_schema":1,"execution_schema":1,"watch_schema":1,"volume_enabled":options.preview_volume}));
+    pipeline.control("boot",json!({"config":config,"mode":if options.fixture.is_some(){"fixture"}else{"live"},"initial_state":"cold","decoder_schema":1,"execution_schema":1,"watch_schema":1,"spend_schema":1,"volume_enabled":options.preview_volume}));
     println!(
         "{}",
         json!({"event":"collector_boot","health":format!("http://{address}/health"),"mode":if options.fixture.is_some(){"fixture"}else{"live"},"paid_requested":options.paid,"staging_delivery":options.staging_delivery,"signals_enabled":options.staging_delivery,"production_signals_enabled":false})

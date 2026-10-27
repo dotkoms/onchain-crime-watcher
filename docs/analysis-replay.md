@@ -35,9 +35,16 @@ analysis replay and report this flag false; missing evidence is not invented. Fr
 manual-mint sessions do not claim automatic-controller verification.
 
 This verifies desired subscription choices, not successful upstream subscription delivery or
-billing. `financial_admission_replayed:false`, `subscription_transport_replayed:false`,
+billing. New captures with `spend_schema: 1` also record starting ledger usage and each credit
+check/reservation. Replay reuses the production reservation calculation, checks rollover and
+rollback behavior, and consumes credits for every recorded billable frame, including duplicates
+and inactive frames. `financial_admission_replayed:true` means those local reservations and
+credits were checked; it never verifies upstream billing. Missing/unfinished reservations and
+redacted billable frames fail instead of guessing. Older captures report this flag false.
+
+`subscription_transport_replayed:false`,
 `delivery_replayed:false` and `external_responses_replayed:false` make those limits explicit.
-Discord queue/admission/results, durable spend response tapes, RPC response tapes and full
+Discord queue/admission/results, durable-write failure response tapes, RPC response tapes and full
 multi-source authority switching are not replayed. Full M2a replay, multi-segment/checkpoint
 restart, train/test reports, real seven-day captures and empirical threshold evaluation remain
 pending. No fitted threshold or historical performance result is claimed without that evidence.

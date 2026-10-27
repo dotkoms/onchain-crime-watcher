@@ -85,6 +85,10 @@ fn advance_day(credits: &mut u64, credit_day: &mut u64, today: u64) {
 impl Budget {
     async fn refill(&mut self, pipeline: &mut Pipeline) -> Result<bool, String> {
         let day = wall_ms() / 86_400_000;
+        pipeline.control(
+            "spend_check",
+            serde_json::json!({"day":day,"credits":self.credits,"credit_day":self.credit_day}),
+        );
         advance_day(&mut self.credits, &mut self.credit_day, day);
         if self.credits > 0 {
             return Ok(true);
@@ -105,7 +109,7 @@ impl Budget {
         set(&pipeline.health.budget_reserved, reserved);
         pipeline.control(
             "spend_reservation",
-            serde_json::json!({"grant":grant,"reserved":reserved}),
+            serde_json::json!({"day":day,"grant":grant,"reserved":reserved}),
         );
         Ok(grant > 0)
     }
@@ -127,11 +131,15 @@ pub(crate) async fn live(
             config.gate.stop_margin_messages,
             config.gate.reservation_messages,
         ) {
-            Ok(ledger) => Some(Budget {
-                ledger: Arc::new(Mutex::new(ledger)),
-                credits: 0,
-                credit_day: wall_ms() / 86_400_000,
-            }),
+            Ok(ledger) => {
+                let day = wall_ms() / 86_400_000;
+                pipeline.control("spend_start",serde_json::json!({"schema":1,"state":ledger.snapshot(),"credit_day":day,"credits":0}));
+                Some(Budget {
+                    ledger: Arc::new(Mutex::new(ledger)),
+                    credits: 0,
+                    credit_day: day,
+                })
+            }
             Err(_) => {
                 set_state(&pipeline.health.paid_state, "ledger_unavailable");
                 None
@@ -587,7 +595,7 @@ fn observe_application(app: &mut CreateWatchdog, pipeline: &mut Pipeline, now: u
     suspected
 }
 
-fn billable(bytes: &[u8]) -> bool {
+pub(crate) fn billable(bytes: &[u8]) -> bool {
     let value: Result<serde_json::Value, _> = serde_json::from_slice(bytes);
     !matches!(
         value

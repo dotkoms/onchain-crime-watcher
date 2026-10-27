@@ -199,3 +199,46 @@ fn timer_replay_removes_unqualified_mints_at_the_recorded_retention_boundary() {
     assert_eq!(report["watch_plans"], 2);
     assert_eq!(report["active_mints"], 0);
 }
+
+#[test]
+fn spend_replay_checks_starting_usage_reservations_and_never_resets_on_clock_rollback() {
+    for invalid in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spend.ocwcap");
+        let mut segment = Segment::create(&path).unwrap();
+        let config = Config::default();
+        let block = config.gate.reservation_messages;
+        let values = [
+            (
+                "boot",
+                json!({"config":config,"execution_schema":1,"spend_schema":1,"initial_state":"cold","volume_enabled":false}),
+            ),
+            (
+                "spend_start",
+                json!({"schema":1,"state":{"day":10,"reserved":block},"credit_day":10,"credits":0}),
+            ),
+            ("spend_check", json!({"day":9,"credits":0,"credit_day":10})),
+            (
+                "spend_reservation",
+                json!({"day":9,"grant":if invalid {block+1} else {block},"reserved":block*2}),
+            ),
+        ];
+        for (i, (kind, value)) in values.into_iter().enumerate() {
+            segment
+                .append(&record(i as u64 + 1, i as u64, kind, value))
+                .unwrap();
+        }
+        segment.sync().unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let result = analysis::run(&path, |_, _| Ok(()));
+        if invalid {
+            assert!(result.is_err());
+        } else {
+            let summary = result.unwrap();
+            assert_eq!(summary["financial_admission_replayed"], true);
+            assert_eq!(summary["spend_reserved_messages"], block * 2);
+            assert_eq!(summary["spend_ledger_day"], 10);
+        }
+        assert_eq!(before, std::fs::read(path).unwrap());
+    }
+}

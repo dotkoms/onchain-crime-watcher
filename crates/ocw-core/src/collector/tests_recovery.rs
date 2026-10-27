@@ -474,6 +474,9 @@ async fn automatic_watch_subscribes_on_the_same_socket_and_excludes_inactive_tra
     let replay = crate::replay::analysis::run(&paths[0], |_, _| Ok(())).unwrap();
     assert_eq!(replay["watch_controller_replayed"], true);
     assert_eq!(replay["accepted_trades"], 1);
+    assert_eq!(replay["financial_admission_replayed"], true);
+    assert_eq!(replay["spend_reserved_messages"], 10);
+    assert_eq!(replay["spend_local_credits"], 8);
     assert!(replay["watch_plans"].as_u64().unwrap() >= 3);
 
     assert_eq!(controls(dir.path(), "watch_admitted").len(), 1);

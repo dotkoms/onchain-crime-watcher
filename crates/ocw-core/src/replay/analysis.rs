@@ -30,6 +30,7 @@ pub fn run(
     let mut input_hash = Sha256::new();
     let mut decision_hash = Sha256::new();
     let mut failure = None;
+    let mut spend = super::spend::Spend::default();
     let mut controller = super::controller::Controller::default();
     let (_, torn) = capture::scan(path, |record| {
         let result = (|| -> Result<(), String> {
@@ -97,11 +98,17 @@ pub fn run(
                     None
                 };
                 controller.configure(&value)?;
+                spend.configure(&value)?;
                 config = Some(initial);
                 return Ok(());
             }
             let config = config.as_ref().expect("checked configuration");
             let decoder = decoder.as_mut().expect("initialized decoder");
+            if record.kind != "frame" {
+                let step: Value = serde_json::from_slice(&record.payload)
+                    .map_err(|_| "invalid analysis control record")?;
+                spend.step(&record.kind, &step, config)?;
+            }
             let mut produced = Vec::new();
             let mut applied_now = now;
             match record.kind.as_str() {
@@ -120,6 +127,7 @@ pub fn run(
                     if pending.is_some() || record.payload.len() > config.feed.max_frame_bytes {
                         return Err("missing analysis frame application or oversized frame".into());
                     }
+                    spend.frame(&record.payload)?;
                     pending = Some(record);
                     frames += 1;
                     return Ok(());
@@ -270,6 +278,7 @@ pub fn run(
         return Err("analysis capture is torn or has an incomplete execution tail".into());
     }
     controller.complete()?;
+    spend.complete()?;
     let mut summary = json!({"event":"analysis_replay_complete","execution_schema":1,"records":records,"frames":frames,"accepted_trades":trades,"watch_operations":subscriptions,"decisions":decisions,"input_sha256":format!("{:x}",input_hash.finalize()),"decision_sha256":format!("{:x}",decision_hash.finalize()),"volume":engine.as_ref().map(Engine::stats),"active_mints":engine.as_ref().map(Engine::active_mints),"alerts_sent":0,"network":"disabled","initial_state":"recorded_cold_boot","delivery_replayed":false,"external_responses_replayed":false,"coverage":"only the supplied uninterrupted capture; provider completeness unverified"});
     summary.as_object_mut().expect("summary object").extend(
         controller
@@ -278,5 +287,9 @@ pub fn run(
             .expect("controller summary")
             .clone(),
     );
+    summary
+        .as_object_mut()
+        .expect("summary object")
+        .extend(spend.summary().as_object().expect("spend summary").clone());
     Ok(summary)
 }

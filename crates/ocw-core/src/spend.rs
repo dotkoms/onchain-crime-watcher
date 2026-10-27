@@ -27,6 +27,32 @@ impl State {
         }
     }
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Snapshot {
+    pub day: u64,
+    pub reserved: u64,
+}
+impl Snapshot {
+    pub fn reserve(&self, day: u64, limit: u64, block: u64) -> (Self, u64) {
+        let (next_day, current) = if day > self.day {
+            (day, 0)
+        } else {
+            (self.day, self.reserved)
+        };
+        let grant = block.min(limit.saturating_sub(current));
+        if grant == 0 {
+            return (self.clone(), 0);
+        }
+        (
+            Self {
+                day: next_day,
+                reserved: current + grant,
+            },
+            grant,
+        )
+    }
+}
 pub struct Ledger {
     path: PathBuf,
     state: State,
@@ -64,20 +90,21 @@ impl Ledger {
             block,
         })
     }
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            day: self.state.day,
+            reserved: self.state.reserved,
+        }
+    }
     pub fn reserved(&self) -> u64 {
         self.state.reserved
     }
     pub fn reserve(&mut self, day: u64) -> io::Result<u64> {
-        let (next_day, current) = if day > self.state.day {
-            (day, 0)
-        } else {
-            (self.state.day, self.state.reserved)
-        };
-        let grant = self.block.min(self.limit.saturating_sub(current));
+        let (next, grant) = self.snapshot().reserve(day, self.limit, self.block);
         if grant == 0 {
             return Ok(0);
         }
-        let state = State::new(next_day, current + grant);
+        let state = State::new(next.day, next.reserved);
         atomic_write(&self.path, &serde_json::to_vec(&state)?)?;
         self.state = state;
         Ok(grant)

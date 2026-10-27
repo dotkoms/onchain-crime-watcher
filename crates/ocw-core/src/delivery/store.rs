@@ -36,7 +36,8 @@ struct Envelope {
     state: State,
 }
 pub(super) struct Journal {
-    path: PathBuf,
+    path: Option<PathBuf>,
+    pub(super) audit: Option<super::audit::Audit>,
     state: State,
     config: DeliveryConfig,
 }
@@ -49,21 +50,10 @@ impl Journal {
             let envelope: Envelope = serde_json::from_slice(&fs::read(path)?)
                 .map_err(|_| io::Error::other("corrupt delivery journal"))?;
             let checksum = format!("{:x}", Sha256::digest(serde_json::to_vec(&envelope.state)?));
-            if envelope.version != 1
-                || checksum != envelope.checksum
-                || envelope.state.entries.len() > 40
-                || envelope.state.tokens > 2
-                || envelope.state.refilled > envelope.state.clock
-                || envelope.state.entries.iter().any(|e| {
-                    e.at > envelope.state.clock
-                        || e.id.len() > 128
-                        || e.message_id
-                            .as_ref()
-                            .is_some_and(|id| id.parse::<u64>().ok().filter(|n| *n > 0).is_none())
-                })
-            {
+            if envelope.version != 1 || checksum != envelope.checksum {
                 return Err(io::Error::other("corrupt delivery journal"));
             }
+            validate(&envelope.state)?;
             envelope.state
         } else {
             State {
@@ -74,7 +64,8 @@ impl Journal {
             }
         };
         Ok(Self {
-            path: path.into(),
+            path: Some(path.into()),
+            audit: None,
             state,
             config: config.clone(),
         })
@@ -86,14 +77,43 @@ impl Journal {
             checksum,
             state: state.clone(),
         })?;
-        atomic_write(&self.path, &bytes)?;
+        if let Some(path) = &self.path {
+            atomic_write(path, &bytes)?;
+        }
         self.state = state;
         Ok(())
     }
     pub fn contains(&self, id: &str) -> bool {
         self.state.entries.iter().any(|e| e.id == id)
     }
+    pub fn audit(&mut self, audit: super::audit::Audit) {
+        self.audit = Some(audit);
+    }
+    pub fn snapshot(&self) -> serde_json::Value {
+        serde_json::to_value(&self.state).expect("delivery state serialization")
+    }
+    pub fn memory(config: &DeliveryConfig, value: serde_json::Value) -> io::Result<Self> {
+        let state: State = serde_json::from_value(value)
+            .map_err(|_| io::Error::other("invalid recorded delivery state"))?;
+        validate(&state)?;
+        Ok(Self {
+            path: None,
+            audit: None,
+            state,
+            config: config.clone(),
+        })
+    }
     pub fn reserve(&mut self, id: &str, tier: Tier, now: u64) -> io::Result<bool> {
+        let result = self.reserve_inner(id, tier, now);
+        if let Some(audit) = &self.audit {
+            match &result {
+            Ok(accepted)=>audit.record("reserve",serde_json::json!({"id":id,"tier":tier,"wall_ms":now,"accepted":accepted,"state_sha256":super::audit::hash(&self.snapshot())})),
+            Err(_)=>audit.record("error",serde_json::json!({"stage":"reserve"})),
+        }
+        }
+        result
+    }
+    fn reserve_inner(&mut self, id: &str, tier: Tier, now: u64) -> io::Result<bool> {
         if id.is_empty() || id.len() > 128 || self.contains(id) {
             return Ok(false);
         }
@@ -143,6 +163,21 @@ impl Journal {
         Ok(true)
     }
     pub fn finish(&mut self, id: &str, message_id: Option<&str>, unknown: bool) -> io::Result<()> {
+        let result = self.finish_inner(id, message_id, unknown);
+        if let Some(audit) = &self.audit {
+            match &result {
+            Ok(())=>audit.record("finish",serde_json::json!({"id":id,"message_id":message_id,"unknown":unknown,"state_sha256":super::audit::hash(&self.snapshot())})),
+            Err(_)=>audit.record("error",serde_json::json!({"stage":"finish"})),
+        }
+        }
+        result
+    }
+    fn finish_inner(
+        &mut self,
+        id: &str,
+        message_id: Option<&str>,
+        unknown: bool,
+    ) -> io::Result<()> {
         let mut state = self.state.clone();
         let entry = state
             .entries
@@ -169,4 +204,22 @@ impl Journal {
             .message_id
             .as_deref()
     }
+}
+
+fn validate(state: &State) -> io::Result<()> {
+    if state.entries.len() > 40
+        || state.tokens > 2
+        || state.refilled > state.clock
+        || state.entries.iter().any(|e| {
+            e.at > state.clock
+                || e.id.is_empty()
+                || e.id.len() > 128
+                || e.message_id
+                    .as_ref()
+                    .is_some_and(|id| id.parse::<u64>().ok().filter(|n| *n > 0).is_none())
+        })
+    {
+        return Err(io::Error::other("corrupt delivery journal"));
+    }
+    Ok(())
 }

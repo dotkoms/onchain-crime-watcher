@@ -381,6 +381,15 @@ async fn configured_runtime_checks_identity_uses_worker_and_retains_process_owne
     set(&health.generation, 1);
     set_state(&health.feed_state, "connected");
     let global = Arc::new(Pause::default());
+    let history = crate::history::Runtime::start(
+        data_dir.join("history"),
+        "boot1".into(),
+        16 * 1024 * 1024,
+        health.clone(),
+        guard.clone(),
+    )
+    .await
+    .unwrap();
     let origin = Instant::now();
     let context = super::Context {
         data_dir: data_dir.clone(),
@@ -389,6 +398,7 @@ async fn configured_runtime_checks_identity_uses_worker_and_retains_process_owne
         guard: guard.clone(),
         boot: "boot1".into(),
         origin,
+        history: Some(history.handle.clone()),
     };
     let config = DeliveryConfig {
         staging_channel_id: Some("22".into()),
@@ -405,6 +415,10 @@ async fn configured_runtime_checks_identity_uses_worker_and_retains_process_owne
         .submit(candidate(Verdict::Fire, 1, origin).decision, 1);
     until(|| health.snapshot()["staging_delivery"]["sent"] == 1).await;
     runtime.shutdown().await.unwrap();
+    history.shutdown().await.unwrap();
+    let replay = super::replay::run(&data_dir.join("history/observations.ocwh")).unwrap();
+    assert_eq!(replay["observed_sent"], 1);
+    assert_eq!(replay["attempts"], 1);
     assert!(crate::storage::ProcessLock::acquire(&data_dir).is_ok());
     assert_eq!(endpoint.seen.lock().unwrap().len(), 2); // readiness GET, then one POST
 }
@@ -492,6 +506,7 @@ async fn idle_runtime(data_dir: &std::path::Path) -> (super::Runtime, Server) {
         guard: Arc::new(crate::storage::ProcessLock::acquire(data_dir).unwrap()),
         boot: "idle".into(),
         origin: Instant::now(),
+        history: None,
     };
     let runtime = super::Runtime::with_http(
         DeliveryConfig {

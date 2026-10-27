@@ -17,6 +17,7 @@ use tokio::sync::{Notify, watch};
 struct Cleanup {
     queue: Arc<Mutex<Queue>>,
     health: Arc<Health>,
+    audit: Option<super::audit::Audit>,
 }
 impl Drop for Cleanup {
     fn drop(&mut self) {
@@ -24,6 +25,13 @@ impl Drop for Cleanup {
             self.health
                 .delivery_dropped
                 .fetch_add(queue.clear() as u64, Ordering::Relaxed);
+        }
+        if let Some(audit) = &self.audit {
+            if std::thread::panicking() {
+                audit.record("error", serde_json::json!({"stage":"worker_panic"}));
+            } else {
+                audit.record("end", serde_json::json!({}));
+            }
         }
     }
 }
@@ -39,7 +47,9 @@ pub(super) async fn run(
     let _cleanup = Cleanup {
         queue: queue.clone(),
         health: health.clone(),
+        audit: journal.audit.clone(),
     };
+    let audit = journal.audit.clone();
     let mut paused = Instant::now();
     loop {
         health.pulse(&health.delivery_tick_ms);
@@ -98,10 +108,9 @@ pub(super) async fn run(
             }
         }
         let now = Instant::now();
-        if now >= candidate.expires
-            || candidate.generation != value(&health.generation)
-            || !health.feed_connected()
-        {
+        let generation = value(&health.generation);
+        let connected = health.feed_connected();
+        if now >= candidate.expires || candidate.generation != generation || !connected {
             inc(&health.delivery_expired);
             if journal.finish(&candidate.id, None, false).is_err() {
                 set_state(&health.delivery_state, "journal_error");
@@ -119,9 +128,13 @@ pub(super) async fn run(
         };
         inc(&health.delivery_attempted);
         candidate.attempts += 1;
+        if let Some(audit) = &audit {
+            audit.attempt(&candidate, now, generation, connected, &payload);
+        }
         let report = tokio::select! {biased;
             _=stop.changed()=>{
                 inc(&health.delivery_unknown);
+                if let Some(audit)=&audit {audit.response(&candidate.id,&Outcome::Unknown,Instant::now());}
                 let result=journal.finish(&candidate.id,None,true);
                 set_state(&health.delivery_state,if result.is_err(){"journal_error"}else{"stopped"});
                 return;
@@ -131,6 +144,9 @@ pub(super) async fn run(
         paused = Instant::now()
             .checked_add(report.pause)
             .unwrap_or(candidate.expires);
+        if let Some(audit) = &audit {
+            audit.response(&candidate.id, &report.outcome, paused);
+        }
         let (message, unknown) = match report.outcome {
             Outcome::Sent(id) => {
                 inc(&health.delivery_sent);

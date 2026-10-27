@@ -7,6 +7,7 @@ use std::{
 };
 use url::Url;
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Outcome {
     Sent(String),
     RateLimited,

@@ -680,6 +680,7 @@ async fn run_inner(
                     guard: lock.clone(),
                     boot: boot.clone(),
                     origin,
+                    history: history.clone(),
                 },
             )
             .await?,
@@ -810,16 +811,17 @@ async fn run_inner(
         None => Ok(()),
     };
     pipeline.history = None;
-    let history_result = match history_runtime {
-        Some(runtime) => runtime.shutdown().await,
-        None => Ok(()),
-    };
     let monitor_result = match monitor_runtime {
         Some(runtime) => runtime.shutdown().await,
         None => Ok(()),
     };
     let delivery_result = match delivery_runtime {
         Some(sender) => sender.shutdown().await,
+        None => Ok(()),
+    };
+    // Delivery's final receipt and queue-clear evidence must precede history sealing.
+    let history_result = match history_runtime {
+        Some(runtime) => runtime.shutdown().await,
         None => Ok(()),
     };
     if result.is_err() {

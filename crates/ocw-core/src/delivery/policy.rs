@@ -65,6 +65,7 @@ impl Candidate {
 pub(super) struct Queue {
     pending: Vec<Candidate>,
     capacity: usize,
+    pub(super) audit: Option<super::audit::Audit>,
     pub replaced: u64,
 }
 impl Queue {
@@ -72,10 +73,25 @@ impl Queue {
         Self {
             pending: Vec::new(),
             capacity: capacity.clamp(1, 64),
+            audit: None,
             replaced: 0,
         }
     }
+    pub fn audit(&mut self, audit: super::audit::Audit) {
+        self.audit = Some(audit);
+    }
     pub fn insert(&mut self, c: Candidate) -> bool {
+        let input = self.audit.as_ref().map(|audit| audit.candidate(&c));
+        let accepted = self.insert_inner(c);
+        if let (Some(audit), Some(input)) = (&self.audit, input) {
+            audit.record(
+                "insert",
+                serde_json::json!({"candidate":input,"accepted":accepted,"replaced":self.replaced}),
+            );
+        }
+        accepted
+    }
+    fn insert_inner(&mut self, c: Candidate) -> bool {
         if self.pending.iter().any(|p| p.id == c.id) {
             return false;
         }
@@ -96,9 +112,25 @@ impl Queue {
         let before = self.pending.len();
         self.pending
             .retain(|c| now < c.expires && c.generation == generation);
-        before - self.pending.len()
+        let pruned = before - self.pending.len();
+        if pruned > 0
+            && let Some(audit) = &self.audit
+        {
+            audit.record(
+                "prune",
+                serde_json::json!({"now_ns":audit.ns(now),"generation":generation,"pruned":pruned}),
+            );
+        }
+        pruned
     }
     pub fn take(&mut self, now: Instant, generation: u64) -> Option<Candidate> {
+        let result = self.take_inner(now, generation);
+        if let Some(audit) = &self.audit {
+            audit.record("take",serde_json::json!({"now_ns":audit.ns(now),"generation":generation,"id":result.as_ref().map(|c|&c.id)}));
+        }
+        result
+    }
+    fn take_inner(&mut self, now: Instant, generation: u64) -> Option<Candidate> {
         self.prune(now, generation);
         let (index, _) = self
             .pending
@@ -111,6 +143,9 @@ impl Queue {
     pub fn clear(&mut self) -> usize {
         let count = self.pending.len();
         self.pending.clear();
+        if let Some(audit) = &self.audit {
+            audit.record("clear", serde_json::json!({"removed":count}));
+        }
         count
     }
 }

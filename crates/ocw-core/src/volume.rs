@@ -1,7 +1,7 @@
 //! Volume prototype for normalized real events. Totals are exact lamports; statistics use f64.
 //! Thresholds are scope §2A priors, not validated predictions or trading recommendations.
 use crate::feed::{Event, Trade};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -11,7 +11,7 @@ const SAMPLE: usize = 1024;
 const TAKERS: usize = 256;
 const SOL: f64 = 1_000_000_000.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
     Warmup,

@@ -1,6 +1,8 @@
 //! Explicitly enabled staging delivery; never used for replay or generated inputs.
+mod audit;
 pub(crate) mod http;
 mod policy;
+pub mod replay;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -80,6 +82,7 @@ pub(crate) struct Context {
     pub guard: Arc<ProcessLock>,
     pub boot: String,
     pub origin: Instant,
+    pub history: Option<crate::history::Handle>,
 }
 struct ActiveGuard(Arc<AtomicBool>);
 impl Drop for ActiveGuard {
@@ -124,12 +127,13 @@ impl Runtime {
             guard,
             boot,
             origin,
+            history,
         } = context;
         http.verify().await?;
         let path = data_dir.join("staging-delivery.json");
         let policy = config.clone();
         let opening_guard = guard.clone();
-        let journal = tokio::task::spawn_blocking(move || {
+        let mut journal = tokio::task::spawn_blocking(move || {
             let _guard = opening_guard;
             store::Journal::open(&path, &policy)
         })
@@ -138,7 +142,17 @@ impl Runtime {
         .map_err(|_| "delivery journal unavailable; refusing staging sends")?;
         set(&health.delivery_enabled, 1);
         set_state(&health.delivery_state, "ready");
-        let queue = Arc::new(Mutex::new(Queue::new(config.queue_capacity)));
+        let audit = history.map(|history| {
+            audit::Audit::start(history, origin, &boot, &config, journal.snapshot())
+        });
+        if let Some(audit) = &audit {
+            journal.audit(audit.clone());
+        }
+        let mut pending = Queue::new(config.queue_capacity);
+        if let Some(audit) = audit {
+            pending.audit(audit);
+        }
+        let queue = Arc::new(Mutex::new(pending));
         let notify = Arc::new(Notify::new());
         let active = Arc::new(AtomicBool::new(true));
         let handle = Handle {
@@ -205,3 +219,6 @@ impl Drop for Runtime {
         let _ = self.stop.send(true);
     }
 }
+
+#[cfg(test)]
+mod tests_replay;

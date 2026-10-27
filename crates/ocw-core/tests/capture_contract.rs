@@ -137,3 +137,11 @@ fn decompression_is_bounded_even_with_a_valid_checksum() {
     };
     assert!(err.to_string().contains("size"));
 }
+
+#[test]
+fn patched_decoder_reads_real_provider_bytes_compressed_by_the_previous_zstd_version() {
+    let compressed = include_bytes!("../../../tests/fixtures/pumpportal-create-zstd-0133.zst");
+    let original = include_bytes!("../../../tests/fixtures/pumpportal-create-observed.jsonl");
+    let decoded = zstd::bulk::decompress(compressed, 65_536).unwrap();
+    assert_eq!(decoded, original);
+}

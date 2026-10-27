@@ -13,3 +13,10 @@ Treat that reserve as unusable, preserve the create, and never round it into vol
 This fixture says nothing about the live trade/migration schema or completeness.
 
 SHA-256: `1b70971a8aad6320adb9170db01f9f840a3908486d9e1993b21ec63bfd211f32`.
+
+`pumpportal-create-zstd-0133.zst` is exactly the JSONL above, compressed at level 3 with
+`zstd` 0.13.3 on 2026-10-27. It is used only by a backward-compatibility test to confirm that
+the patched decoder reads existing compressed provider data byte for byte. It is not another
+provider observation, synthetic trade stream or application demo.
+
+Compressed SHA-256: `a8c02032b100427f7519a5a40ef948bb3a86ceb65e7ede0ead5761495ee8a13d`.

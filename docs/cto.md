@@ -37,8 +37,9 @@ are not queued indefinitely. Source 429 pauses and channel pauses survive restar
 global pauses are shared with other channels. Unauthorized or changed webhooks block the worker.
 
 The card says **curated claim** and explicitly states that it does not verify ownership,
-control or who holds tokens. Bundle and price fields say unavailable until independently
-verified history is connected. A non-pump Solana listing remains eligible with the same limits.
+control or who holds tokens. Optional bundle integration supplies verified funding and partial
+observed sale bounds; absent evidence and historical price context remain unavailable. A
+non-pump Solana listing remains eligible with the same limits.
 
 `/health` reports CTO source/worker state, last successful poll, unknown dates, high-water
 suppression, observed listings, send outcomes and budget drops. `/ready` distinguishes CTO
@@ -48,3 +49,13 @@ Production delivery remains disabled under the current project contract.
 
 Source: [DexScreener API reference](https://docs.dexscreener.com/api/reference),
 `GET /community-takeovers/latest/v1` (documented limit 60 requests/minute).
+
+### Optional bundle observations
+
+`[bundle]` is disabled by default. Capture requires paid automatic launch watching; funding
+also requires CTO enabled and `SOLANA_RPC_URL`, using the existing `[probe]` RPC budgets.
+Persist the entire data directory, including `launch/` and `bundle-analysis/`, so snapshots,
+funding caches and edit intents survive restart. Back up these directories with the existing
+offline snapshot workflow. Cards state partial observed history, never fabricated zeroes or
+CLEARED. Funding edits target the existing verified CTO staging message and never retry an
+ambiguous HTTP outcome. See [bundle implementation](bundle.md#implementation-progress-2026-10-27).

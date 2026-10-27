@@ -1,9 +1,9 @@
 # Hosting preparation — nothing deployed
 
 The repository provides an offline preflight, Docker image/Compose template, systemd unit and
-checksummed offline snapshots. These run the implemented collector and staging-volume path.
-Bundle tracking, wallet rankings, full decision backtesting and independent
-secondary-feed switching remain unfinished. Adding keys does not enable those missing features.
+checksummed offline snapshots. These run the implemented collector, staging-volume and optional CTO/bundle paths.
+Complete bundle transfer/price verification, wallet rankings, full decision backtesting and
+independent secondary-feed switching remain unfinished. Keys do not enable missing features.
 
 ## Supply fresh inputs
 
@@ -120,3 +120,13 @@ authorized restart. New source sessions start cold; no rollback invents detector
 Sources: [Docker multi-stage builds](https://docs.docker.com/build/building/multi-stage/),
 [Compose services](https://docs.docker.com/reference/compose-file/services/),
 [systemd service options](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html).
+
+### Optional bundle observations
+
+`[bundle]` is disabled by default. Capture requires paid automatic launch watching; funding
+also requires CTO enabled and `SOLANA_RPC_URL`, using the existing `[probe]` RPC budgets.
+Persist the entire data directory, including `launch/` and `bundle-analysis/`, so snapshots,
+funding caches and edit intents survive restart. Back up these directories with the existing
+offline snapshot workflow. Cards state partial observed history, never fabricated zeroes or
+CLEARED. Funding edits target the existing verified CTO staging message and never retry an
+ambiguous HTTP outcome. See [bundle implementation](bundle.md#implementation-progress-2026-10-27).

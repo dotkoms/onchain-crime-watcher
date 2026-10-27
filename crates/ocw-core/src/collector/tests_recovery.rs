@@ -390,6 +390,7 @@ async fn automatic_watch_subscribes_on_the_same_socket_and_excludes_inactive_tra
         wall_ms() / 86_400_000,
     )
     .unwrap();
+    config.bundle.enabled = true;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = Url::parse(&format!("ws://{}", listener.local_addr().unwrap())).unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -414,7 +415,7 @@ async fn automatic_watch_subscribes_on_the_same_socket_and_excludes_inactive_tra
         assert_eq!(command["method"], "subscribeTokenTrade");
         assert_eq!(command["keys"][0], mint);
         for (key, sig) in [(9u8, 1u8), (1, 2)] {
-            socket.send(Message::Text(json!({"txType":"buy","mint":bs58::encode([key;32]).into_string(),"traderPublicKey":bs58::encode([2u8;32]).into_string(),"signature":bs58::encode([sig;64]).into_string(),"tokenAmount":1,"solAmount":1,"vSolInBondingCurve":31}).to_string().into())).await.unwrap();
+            socket.send(Message::Text(json!({"txType":"buy","mint":bs58::encode([key;32]).into_string(),"traderPublicKey":bs58::encode([2u8;32]).into_string(),"signature":bs58::encode([sig;64]).into_string(),"tokenAmount":1,"solAmount":1,"newTokenBalance":1,"vSolInBondingCurve":31}).to_string().into())).await.unwrap();
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         stop.send(()).unwrap();
@@ -446,6 +447,20 @@ async fn automatic_watch_subscribes_on_the_same_socket_and_excludes_inactive_tra
     assert_eq!(result["feed"]["trades"], 1);
     assert_eq!(result["paid"]["billable_received"], 2);
     assert_eq!(result["paid"]["reserved_messages"], 10);
+    let launch = crate::bundle::store::read(&dir.path().join("data/launch"), [1; 32])
+        .unwrap()
+        .unwrap();
+    assert_eq!(launch.buyers.len(), 1);
+    assert!(launch.partial);
+    assert_eq!(
+        serde_json::to_value(&launch.buyers.values().next().unwrap().bag).unwrap()["original"],
+        1_000_000
+    );
+    assert!(
+        crate::bundle::store::read(&dir.path().join("data/launch"), [9; 32])
+            .unwrap()
+            .is_none()
+    );
     let discarded = controls(dir.path(), "discarded_frame");
     assert_eq!(discarded.len(), 1);
     assert_eq!(discarded[0]["reason"], "inactive_subscription");

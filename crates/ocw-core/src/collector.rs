@@ -118,6 +118,7 @@ pub(crate) struct Pipeline {
     volume: Option<Engine>,
     delivery: Option<delivery::Handle>,
     history: Option<crate::history::Handle>,
+    bundle: Option<crate::bundle::runtime::Handle>,
     pub last_trade: Option<crate::feed::Trade>,
     pub rpc: Option<crate::rpc::Client>,
 }
@@ -174,6 +175,9 @@ impl Pipeline {
             if let Some(engine) = &mut self.volume {
                 engine.invalidate();
             }
+            if let Some(bundle) = &self.bundle {
+                bundle.submit(crate::bundle::runtime::Input::Gap(None));
+            }
             self.control("redacted_frame", json!({"reason":"credential_echo"}));
             return None;
         }
@@ -187,6 +191,7 @@ impl Pipeline {
         );
         match self.decoder.decode(&bytes, now) {
             Ok(event) => {
+                self.bundle_event(&event, &bytes, stamp, allow_create);
                 if let Event::Trade(trade) = &event {
                     self.last_trade = Some(trade.clone());
                 }
@@ -227,6 +232,9 @@ impl Pipeline {
                 }
             }
             Err(_) => {
+                if let Some(bundle) = &self.bundle {
+                    bundle.submit(crate::bundle::runtime::Input::Gap(None));
+                }
                 inc(&self.health.decode_errors);
                 if let Some(engine) = &mut self.volume {
                     engine.invalidate();
@@ -238,6 +246,51 @@ impl Pipeline {
             &self.health.unusable_reserves,
             self.decoder.unusable_reserves(),
         );
+    }
+    fn bundle_event(&self, event: &Event, bytes: &Bytes, stamp: FrameStamp, allow_create: bool) {
+        use crate::bundle::{capture::Launch, runtime::Input};
+        let Some(bundle) = &self.bundle else {
+            return;
+        };
+        match event {
+            Event::Create(mint)
+                if allow_create
+                    && self
+                        .health
+                        .paid_state
+                        .lock()
+                        .is_ok_and(|state| *state == "observing_auto") =>
+            {
+                if let Some(mut launch) =
+                    Launch::new(*mint, &self.boot, stamp.now_ms, stamp.wall_ms)
+                {
+                    let raw: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+                    launch.creator = raw["traderPublicKey"]
+                        .as_str()
+                        .and_then(|s| crate::feed::key::<32>(s).ok());
+                    launch.curve = raw["bondingCurveKey"]
+                        .as_str()
+                        .and_then(|s| crate::feed::key::<32>(s).ok());
+                    bundle.submit(Input::Create(Box::new(launch)));
+                }
+            }
+            Event::Trade(trade) => {
+                let raw: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+                let balance = raw
+                    .get("newTokenBalance")
+                    .and_then(|v| crate::feed::units(v.as_str().unwrap_or(&v.to_string()), 6));
+                bundle.submit(Input::Trade {
+                    seq: stamp.input_seq,
+                    mono: stamp.now_ms,
+                    wall: stamp.wall_ms,
+                    trade: trade.clone(),
+                    balance,
+                });
+            }
+            Event::Migration(mint) => bundle.submit(Input::Gap(Some(*mint))),
+            Event::Unresolved => bundle.submit(Input::Gap(None)),
+            _ => {}
+        }
     }
     pub(crate) fn discard_received(&mut self, stamp: FrameStamp, reason: &str) {
         self.control(
@@ -252,6 +305,9 @@ impl Pipeline {
         }
     }
     pub(crate) fn forget_mint(&mut self, mint: &[u8; 32], now: u64) {
+        if let Some(bundle) = &self.bundle {
+            bundle.submit(crate::bundle::runtime::Input::Forget(*mint));
+        }
         self.control(
             "watch_apply",
             json!({"operation":"remove","mint":bs58::encode(mint).into_string(),"apply_ms":now}),
@@ -309,6 +365,9 @@ impl Pipeline {
             .unwrap_or(u64::MAX)
     }
     pub(crate) fn tick_volume(&mut self) {
+        if let Some(bundle) = &self.bundle {
+            bundle.submit(crate::bundle::runtime::Input::Clock(self.now_ms()));
+        }
         let now = self.step("clock_tick", json!({})).now_ms;
         if let Some(engine) = &mut self.volume {
             let decisions = engine.advance(now).expect("monotonic receive clock");
@@ -317,6 +376,9 @@ impl Pipeline {
         }
     }
     pub(crate) fn reset_volume(&mut self) {
+        if let Some(bundle) = &self.bundle {
+            bundle.submit(crate::bundle::runtime::Input::Gap(None));
+        }
         let now = self.step("volume_reset", json!({})).now_ms;
         if let Some(engine) = &mut self.volume {
             engine.gap(now).expect("monotonic receive clock");
@@ -332,7 +394,10 @@ pub async fn run(
     let secrets = if options.fixture.is_some() {
         Secrets::default()
     } else {
-        Secrets::from_env(options.staging_delivery, config.probe.enabled)?
+        Secrets::from_env(
+            options.staging_delivery,
+            config.probe.enabled || config.bundle.funding,
+        )?
     };
     let endpoint =
         Url::parse("wss://pumpportal.fun/api/data").map_err(|_| "invalid built-in endpoint")?;
@@ -413,11 +478,16 @@ async fn run_inner(
             return Err("CTO delivery requires a distinct webhook".into());
         }
     }
+    if config.bundle.enabled
+        && (options.fixture.is_some() || !options.paid || !config.feed.auto_watch)
+    {
+        return Err("bundle capture requires live paid automatic watching".into());
+    }
     let lock = Arc::new(
         ProcessLock::acquire(&config.data_dir)
             .map_err(|_| "cannot acquire private data directory/collector lock")?,
     );
-    let rpc = if config.probe.enabled {
+    let rpc = if config.probe.enabled || config.bundle.funding {
         Some(
             crate::rpc::Client::open(
                 secrets
@@ -482,6 +552,39 @@ async fn run_inner(
             "disabled"
         },
     );
+    set(&health.bundle_enabled, u64::from(config.bundle.enabled));
+    set_state(
+        &health.bundle_analysis_state,
+        if config.bundle.funding {
+            "idle"
+        } else {
+            "disabled"
+        },
+    );
+    set_state(
+        &health.bundle_state,
+        if config.bundle.enabled {
+            "starting"
+        } else {
+            "disabled"
+        },
+    );
+    let mut bundle_runtime = if config.bundle.enabled {
+        Some(
+            crate::bundle::runtime::Runtime::start(
+                config.data_dir.join("launch"),
+                config.bundle.clone(),
+                lock.clone(),
+                health.clone(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let bundle = bundle_runtime
+        .as_ref()
+        .map(|runtime| runtime.handle.clone());
     set(&health.cto_enabled, u64::from(config.cto.enabled));
     set_state(
         &health.cto_worker_state,
@@ -507,6 +610,21 @@ async fn run_inner(
                 lock.clone(),
                 global_pause.clone(),
                 health.clone(),
+                config
+                    .bundle
+                    .enabled
+                    .then(|| crate::bundle::integration::Integration {
+                        root: config.data_dir.join("launch"),
+                        rpc: if config.bundle.funding {
+                            rpc.clone()
+                        } else {
+                            None
+                        },
+                        config: config.bundle.clone(),
+                        boot: boot.clone(),
+                        lock: Arc::new(std::sync::Mutex::new(())),
+                        reads: Arc::new(tokio::sync::Semaphore::new(2)),
+                    }),
             )
             .await?,
         )
@@ -603,6 +721,7 @@ async fn run_inner(
         volume: options.preview_volume.then(|| Engine::new(256)),
         delivery,
         history: history.clone(),
+        bundle,
         last_trade: None,
         rpc,
     };
@@ -638,6 +757,7 @@ async fn run_inner(
                     health.pulse(&health.root_tick_ms);
                     if let Some(history)=&history {history.record("coverage_tick",json!({"coverage":"observed_subset_unverified"}));}
                 },
+                _=async {match &mut bundle_runtime {Some(runtime)=>runtime.completed().await,None=>std::future::pending().await}}=>supervision::red(&health,"bundle"),
                 _=async {match &mut cto_runtime {Some(runtime)=>runtime.completed().await,None=>std::future::pending().await}}=>supervision::red(&health,"cto"),
                 _=async {match &mut history_runtime {Some(runtime)=>runtime.completed().await,None=>std::future::pending().await}}=>supervision::red(&health,"history"),
                 _=async {
@@ -681,6 +801,11 @@ async fn run_inner(
     set_state(&health.transport_state, "stopped");
     set(&health.backoff_ms, 0);
     let cto_result = match cto_runtime {
+        Some(runtime) => runtime.shutdown().await,
+        None => Ok(()),
+    };
+    pipeline.bundle = None;
+    let bundle_result = match bundle_runtime {
         Some(runtime) => runtime.shutdown().await,
         None => Ok(()),
     };
@@ -752,6 +877,7 @@ async fn run_inner(
     if !server_done {
         set_state(&health.health_worker_state, "stopped");
     }
+    bundle_result.map_err(str::to_string)?;
     cto_result.map_err(str::to_string)?;
     result?;
     monitor_result?;
@@ -813,6 +939,7 @@ pub(crate) fn pipeline_for_test(
             volume: None,
             delivery: None,
             history: None,
+            bundle: None,
             last_trade: None,
             rpc: None,
         },

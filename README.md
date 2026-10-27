@@ -24,7 +24,7 @@
 
 **Track the launch stream. Detect unusual volume. Deliver concise alerts with their coverage limits attached.**
 
-Onchain Crime Watcher is an open-source research project for the pump.fun ecosystem. It collects real events, evaluates volume anomalies, and can deliver alerts to an explicitly configured Discord staging channel. Curated community-takeover listings have an independent opt-in polling/staging path. Bundle tracking and wallet signals remain on the roadmap.
+Onchain Crime Watcher is an open-source research project for the pump.fun ecosystem. It collects real events, evaluates volume anomalies, and can deliver alerts to an explicitly configured Discord staging channel. Curated community-takeover listings have an independent opt-in polling/staging path. Optional launch capture and confirmed funding analysis enrich CTO cards with partial observed bundle progress. Wallet signals remain on the roadmap.
 
 ## Project status
 
@@ -38,6 +38,7 @@ Production delivery remains off while provider coverage, billing, Discord accept
 
 | Component | Current capability |
 | --- | --- |
+| Bundle observations | Opt-in durable launch snapshots, bounded confirmed RPC funding checks, and CTO-card enrichment/FIRE edits. Coverage stays partial; CLEARED is withheld. |
 | Real-event collection | One PumpPortal socket; free create/migration events and opt-in bounded paid observation of one mint or automatic launch watching. |
 | Exact amounts | Integer raw-unit decoding, bounded deduplication, and explicit accounting for unresolved SOL amounts. |
 | Volume analysis | Create-anchored buckets, trimmed baselines, participation and concentration gates, and a labelled cold-baseline path. Thresholds remain unvalidated priors. |
@@ -131,9 +132,9 @@ Receive time anchors observation. Unknown amounts stay unresolved, capture loss 
 | Area | Where it stands |
 | --- | --- |
 | Collector, volume core, staging sender | Implemented; live provider and Discord acceptance remain pending. |
-| Reliability | Transport recovery, current-stage crash containment, heartbeat/readiness and opt-in external monitoring implemented. Independent probes, gap healing, full task topology and checkpoint work remain. |
-| Replay and validation | Diagnostic capture inspection exists. Complete decision replay, backtests, and production evidence gates remain. |
-| Community takeovers and bundles | Planned. Feed claims and incomplete launch coverage must be stated explicitly. |
+| Reliability | Supervision, heartbeat/readiness, opt-in external monitoring, independent RPC probes and bounded audit-only gap healing implemented. Real hosted acceptance remains. |
+| Replay and validation | Exact recorded decoder/volume analysis replay implemented. Controller/delivery replay, historical evaluation and production evidence gates remain. |
+| Community takeovers and bundles | Curated CTO polling and partial bundle capture/funding/card integration implemented. Complete transfer/price context and live acceptance remain. |
 | Wallet discovery and exits | Planned. Requires observed positions, cost basis, and coverage-aware accounting. |
 | Secondary provider | Planned. Warm standby and feed comparison are specified, not implemented. |
 

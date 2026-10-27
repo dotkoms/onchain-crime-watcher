@@ -92,3 +92,12 @@ staging_delivery = false
 poll_s = 60
 hourly_cap = 20
 daily_cap = 120
+
+# Optional real launch capture; requires auto_watch and --enable-paid.
+# Funding also requires CTO enabled and SOLANA_RPC_URL (shared RPC budgets).
+[bundle]
+enabled = false
+funding = false
+max_bytes = 536870912
+retention_days = 45
+exclusions = []

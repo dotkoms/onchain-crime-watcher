@@ -132,7 +132,7 @@ pub fn check(
             "explicit_staging_flag_and_distinct_cto_webhook_required_format_only",
         );
     }
-    if config.probe.enabled {
+    if config.probe.enabled || config.bundle.funding {
         let rpc = env("SOLANA_RPC_URL").filter(|v| !v.is_empty());
         add(
             "independent_rpc",
@@ -140,10 +140,19 @@ pub fn check(
                 .is_some_and(|v| crate::rpc::endpoint(v).is_ok()),
             "https_endpoint_required_format_only",
         );
+        if config.probe.enabled {
+            add(
+                "probe_sampling_policy",
+                paid && config.feed.auto_watch && config.watch.max_subs >= 3,
+                "paid_auto_watch_required_for_three_mint_samples",
+            );
+        }
+    }
+    if config.bundle.enabled {
         add(
-            "probe_sampling_policy",
-            paid && config.feed.auto_watch && config.watch.max_subs >= 3,
-            "paid_auto_watch_required_for_three_mint_samples",
+            "bundle_capture_policy",
+            paid && config.feed.auto_watch,
+            "paid_auto_watch_required",
         );
     }
     if config.monitor.deadman {
@@ -156,11 +165,35 @@ pub fn check(
         );
     }
     let ready = checks.iter().all(|row| row["ready"] == true);
-    json!({"mode":"offline_preflight","configuration_ready":ready,"network":"disabled","production_ready":false,"external_acceptance":"not_checked","checks":checks,"pending_product_features":["full_decision_backtesting","bundle_tracking","wallet_rankings_and_alerts","secondary_provider_failover"]})
+    json!({"mode":"offline_preflight","configuration_ready":ready,"network":"disabled","production_ready":false,"external_acceptance":"not_checked","checks":checks,"pending_product_features":["full_decision_backtesting","bundle_complete_history_and_price_context","wallet_rankings_and_alerts","secondary_provider_failover"]})
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn funding_requires_rpc_even_when_independent_probes_are_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            data_dir: dir.path().join("data"),
+            ..Config::default()
+        };
+        config.bundle.enabled = true;
+        config.bundle.funding = true;
+        config.feed.auto_watch = true;
+        config.cto.enabled = true;
+        assert!(!config.probe.enabled);
+        let report = check(&config, false, false, |_| None);
+        let rows = report["checks"].as_array().unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r["component"] == "independent_rpc" && r["ready"] == false)
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r["component"] == "bundle_capture_policy" && r["ready"] == false)
+        );
+        assert!(!config.data_dir.exists());
+    }
     #[test]
     fn missing_inputs_never_write_or_expose_values_and_free_preflight_can_pass() {
         let dir = tempfile::tempdir().unwrap();

@@ -7,6 +7,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     path::PathBuf,
 };
+mod bundle_jobs;
 pub(crate) mod runtime;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -230,13 +231,66 @@ impl Store {
         Ok(candidates)
     }
     fn reserve(&mut self, claim: &Claim, now: u64, config: &Config) -> Result<bool, &'static str> {
+        self.reserve_mode(claim, now, config, false)
+    }
+    fn reserve_edit(
+        &mut self,
+        claim: &Claim,
+        id: &str,
+        now: u64,
+        config: &Config,
+    ) -> Result<bool, &'static str> {
+        let key = bs58::encode(claim.mint).into_string();
+        if self
+            .state
+            .claims
+            .get(&key)
+            .is_none_or(|p| p.message_id.as_deref() != Some(id) || p.outcome != "sent")
+        {
+            return Ok(false);
+        }
+        self.reserve_mode(claim, now, config, true)
+    }
+    fn targets(&self) -> Vec<(Claim, String)> {
+        let mut rows: Vec<_> = self
+            .state
+            .claims
+            .iter()
+            .filter_map(|(key, p)| {
+                if p.outcome == "sent" {
+                    Some((
+                        Claim {
+                            mint: crate::feed::key::<32>(key).ok()?,
+                            date_ms: p.date_ms,
+                        },
+                        p.message_id.clone()?,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.0.date_ms));
+        rows.truncate(32);
+        rows
+    }
+    fn reserve_mode(
+        &mut self,
+        claim: &Claim,
+        now: u64,
+        config: &Config,
+        editing: bool,
+    ) -> Result<bool, &'static str> {
         if now < self.state.wall {
             return Err("CTO clock rollback");
         }
         let mut s = self.state.clone();
         s.wall = now;
         let key = bs58::encode(claim.mint).into_string();
-        if s.claims.get(&key).is_none_or(|v| v.outcome != "observed") {
+        if s.claims
+            .get(&key)
+            .is_none_or(|v| v.outcome != if editing { "sent" } else { "observed" })
+        {
             return Ok(false);
         }
         while s.attempts.front().is_some_and(|at| now - *at >= 86_400_000) {
@@ -261,8 +315,18 @@ impl Store {
             s.tokens -= 1;
             s.attempts.push_back(now);
         }
-        s.claims.get_mut(&key).ok_or("missing CTO intent")?.outcome =
-            if admitted { "reserved" } else { "budget" }.into();
+        s.claims.get_mut(&key).ok_or("missing CTO intent")?.outcome = if admitted {
+            if editing {
+                "bundle_reserved"
+            } else {
+                "reserved"
+            }
+        } else if editing {
+            "sent"
+        } else {
+            "budget"
+        }
+        .into();
         self.save(s)?;
         Ok(admitted)
     }

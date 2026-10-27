@@ -100,7 +100,7 @@ pub enum Tier {
     Fire,
     Cleared,
 }
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Progress {
     pub tier: Tier,
     /// Certified lower display bound, never sale proceeds / purchase spend.
@@ -241,3 +241,10 @@ pub mod funding;
 
 #[cfg(test)]
 mod tests;
+
+pub mod runtime;
+pub mod store;
+
+pub mod rpc;
+
+pub(crate) mod integration;

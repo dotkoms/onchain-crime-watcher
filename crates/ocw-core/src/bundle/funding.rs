@@ -21,7 +21,7 @@ pub struct Evidence {
     pub parent_complete: bool,
     pub jito_tip_payer: Option<[u8; 32]>,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Attribution {
     pub wallet: [u8; 32],
     pub root: Option<[u8; 32]>,

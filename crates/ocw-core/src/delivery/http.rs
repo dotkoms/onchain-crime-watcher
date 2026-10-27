@@ -19,6 +19,7 @@ pub(crate) struct Report {
     pub outcome: Outcome,
     pub pause: Duration,
 }
+#[derive(Clone)]
 pub(crate) struct Http {
     client: reqwest::Client,
     url: Url,
@@ -48,6 +49,10 @@ impl Http {
             global,
         }
     }
+    pub fn identity(&self) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(self.url.as_str()))
+    }
     pub async fn verify(&self) -> Result<(), String> {
         let mut url = self.url.clone();
         url.set_query(None);
@@ -73,6 +78,36 @@ impl Http {
         })
     }
     pub async fn post(&self, payload: &Value, expires: Instant) -> Report {
+        self.send(
+            self.url.clone(),
+            reqwest::Method::POST,
+            payload,
+            expires,
+            None,
+        )
+        .await
+    }
+    pub async fn patch(&self, id: &str, payload: &Value, expires: Instant) -> Report {
+        if id.parse::<u64>().ok().filter(|n| *n > 0).is_none() {
+            return Report {
+                outcome: Outcome::Broken,
+                pause: Duration::ZERO,
+            };
+        }
+        let mut url = self.url.clone();
+        url.set_path(&format!("{}/messages/{id}", url.path()));
+        url.set_query(None);
+        self.send(url, reqwest::Method::PATCH, payload, expires, Some(id))
+            .await
+    }
+    async fn send(
+        &self,
+        url: Url,
+        method: reqwest::Method,
+        payload: &Value,
+        expires: Instant,
+        message_id: Option<&str>,
+    ) -> Report {
         if Instant::now() >= expires {
             return Report {
                 outcome: Outcome::Unknown,
@@ -82,7 +117,7 @@ impl Http {
         let result = tokio::time::timeout_at(tokio::time::Instant::from_std(expires), async {
             let response = self
                 .client
-                .post(self.url.clone())
+                .request(method, url)
                 .json(payload)
                 .send()
                 .await
@@ -174,7 +209,10 @@ impl Http {
                     .as_str()
                     .filter(|id| id.parse::<u64>().ok().is_some_and(|id| id > 0))
                 {
-                    Some(id) if data["channel_id"].as_str() == Some(self.channel.as_str()) => {
+                    Some(id)
+                        if data["channel_id"].as_str() == Some(self.channel.as_str())
+                            && message_id.is_none_or(|expected| expected == id) =>
+                    {
                         Outcome::Sent(id.into())
                     }
                     _ if data["channel_id"]

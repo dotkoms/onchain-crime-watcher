@@ -71,7 +71,7 @@ checkpoint/delta storage, saturation measurements and real acceptance remain pen
 - [ ] Independent probes, bounded gap healing, durable coverage/checkpoints and remaining supervision.
 - [ ] Complete recorded subscription/delivery replay and backtest evidence workflow.
 - [x] CTO polling, persistence, dedup and staging alerts (real source/channel acceptance deferred).
-- [ ] Launch bundle storage, funding analysis, sale tracking and partial coverage.
+- [x] Launch bundle storage, confirmed funding analysis, observed sale tracking and explicit partial coverage.
 - [ ] Wallet cost basis, weekly ranking, watch matching and observed-position exits.
 - [ ] Hosting/secrets/persistence/backup/rollback preparation (no actual deployment).
 - [ ] Independent secondary feed, warm authority switching and no merged signal histories.
@@ -130,8 +130,10 @@ Bundle accounting increment:
 - [x] Original-bag proportional allocation, later-buy handling and balance-gap guards.
 - [x] Native-cost-weighted sold fractions, minimums and conservative exact tier comparisons.
 - [x] Direct/one-hop funding classification, known-account exclusions and fan-out cap.
-- [ ] Wire live capture and durable launch storage into the collector.
-- [ ] Fetch confirmed funding/supply/price facts and connect persisted progress to CTO cards.
+- [x] Wire live capture and durable launch storage into the collector.
+- [x] Fetch confirmed funding/supply facts and connect cached observed progress to CTO cards.
+- [ ] Verify complete post-launch transfer history and historical price context before CLEARED.
 
-The pure bundle model is not yet connected to live cards. CTO bundle fields continue to say
-unavailable. No launch or funding facts are fabricated by these unit-testable rules.
+Live capture, bounded snapshots, confirmed funding retrieval and existing-message CTO edits are
+connected behind disabled-by-default flags. Cards retain partial-history labels; no launch or
+funding facts are fabricated. Real provider acceptance remains pending.

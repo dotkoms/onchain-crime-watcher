@@ -16,6 +16,7 @@ pub struct Config {
     pub watch: crate::watch::Config,
     pub probe: crate::probe::Config,
     pub cto: crate::cto::Config,
+    pub bundle: crate::bundle::runtime::Config,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -110,6 +111,7 @@ impl Default for Config {
             watch: crate::watch::Config::default(),
             probe: crate::probe::Config::default(),
             cto: crate::cto::Config::default(),
+            bundle: crate::bundle::runtime::Config::default(),
         }
     }
 }
@@ -172,6 +174,13 @@ impl Config {
         }
         if self.probe.heal_enabled && (!self.probe.enabled || !self.history.enabled) {
             return Err("healing requires enabled independent probing and durable history".into());
+        }
+        self.bundle.validate()?;
+        if self.bundle.enabled && !self.feed.auto_watch {
+            return Err("bundle capture requires automatic watching".into());
+        }
+        if self.bundle.funding && !self.cto.enabled {
+            return Err("bundle funding requires CTO polling".into());
         }
         self.cto.validate().map_err(str::to_string)?;
         if self.cto.staging_delivery

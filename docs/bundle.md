@@ -375,19 +375,47 @@ Units sit in the key or the comment; `delivery.md` owns `deliver.cto.hourly_cap`
 
 ## Implementation progress (2026-10-27)
 
-The pure `ocw_core::bundle` model now implements observed half-open launch membership, capped
-buyer/event history, original-bag proportional sale allocation, later buys, balance-continuity
-checks, separate proceeds, weighted tier gates and direct/one-hop funding attribution.
-Funding facts must come from validated external evidence; Jito corroboration cannot admit a
-wallet. More than 50 observed children excludes the root and marks coverage partial. Known
-roots/intermediates are excluded, cycles remain unknown, and unrelated roots must be evaluated
-separately rather than pooled to meet minimums.
+The live implementation now connects bounded launch capture, durable snapshots, confirmed RPC
+funding checks and CTO-card edits. Earlier sections describe the target design; where storage
+encoding, configuration or completeness differs, this implementation section is authoritative
+for running the current code. The remaining target capabilities are not advertised as available.
 
-Threshold comparisons use integer bounds that certify the exact answer in normal cases, with
-checked rational arithmetic at ambiguous boundaries. If a boundary cannot be resolved within
-those bounds, `threshold_uncertain` is reported instead of guessing a tier. Displayed basis
-points are explicitly a conservative lower bound. No floating-point division sets a tier.
+Enable `[bundle].enabled` with `feed.auto_watch = true` and `--enable-paid` to capture actual
+observed launches. Funding additionally needs `[bundle].funding = true`, CTO enabled and
+`SOLANA_RPC_URL`. All defaults are off. There are no generated launch records or fallback signals.
 
-This model does not yet supply the live capture/store/RPC/card integration described above.
-It does not make a provider-completeness claim. CTO cards still show bundle status unavailable;
-no supplied key activates an unfinished bundle path.
+A single bounded writer takes 1,024 queued inputs, batches at 64 events or 250 ms, and protects
+up to 20 active launches. Half-open ten-second membership has caps of 256 buyers and 20,000
+ordered events. Missing balances, decoder gaps, subscription removal, overflow and shutdown
+mark history incomplete. Restored records from another boot never imply continuous observation.
+Snapshots are atomic, checksum-protected JSON files in `data/launch`, not the proposed segmented
+binary format. Each file is capped at 16 MiB. The configurable 64 MiB–2 GiB total budget assigns
+three quarters to snapshots and one quarter to analysis/edit metadata. Old inactive records are
+pruned by quota, with age retention checked on startup (1–90 days, default 45); active snapshots are protected. Writes
+preserve a 2 GiB free-disk reserve. Missing or pruned records mean unknown, never zero.
+
+The CTO path reads snapshots with a 750 ms deadline and two bounded blocking readers. At most
+two background jobs run, leaving source polling responsive. Confirmed RPC checks validate the
+native Pump first-buy transaction, signature, opening token balance, initialized six-decimal mint
+and supply. Funding windows are anchored before the first buy and require complete bounded
+signature coverage; equal-slot ordering requires block evidence. Direct and one-hop native SOL
+transfers are checked against successful program execution. Incomplete windows, excluded roots,
+cycles and excessive fan-out cannot invent an attribution. Each job stops at 1,200 calls or
+120 seconds and also obeys the shared durable RPC limits configured under `[probe]`.
+
+Funding facts are cached against immutable launch anchors. Periodic progress refreshes reuse
+those facts and current observed bags without repeating funding RPC calls. Enrichment and FIRE
+updates PATCH an existing verified CTO message only, at least 45 seconds apart, sharing CTO
+attention budgets. Durable intents precede HTTP; an ambiguous PATCH remains reserved and is
+never retried. A changed webhook identity, missing target or pending intent prevents edits.
+
+Original-bag disposal uses exact integer bounds; later buys do not replenish the original bag.
+Proceeds and current inventory are separate. Each funding root must independently meet five
+wallets, 10 SOL and 2% of supply. Cards label the sold fraction as an observed lower bound,
+include observation time, and state partial coverage and one-hop limits. Full post-launch token
+transfer history and historical price validation are unfinished, so every live analysis remains
+partial and **CLEARED is withheld**. Unavailable first-buy balances do not become guessed weights.
+
+Automated tests cover snapshot corruption/pruning, real collector wiring against a local test
+server, confirmed RPC decoding and same-message edits including unknown outcomes. External
+provider/Discord acceptance and signal-threshold evaluation have not been performed.

@@ -372,3 +372,22 @@ Units sit in the key or the comment; `delivery.md` owns `deliver.cto.hourly_cap`
 9. **Sells before observation.** Without complete retained history, print sold share unavailable or an observed lower bound and withhold CLEARED. A current balance is not proof of a sale.
 10. **Near edits off.** Keep SCOPE's default; a near edit spends a token on the least actionable tier.
 
+
+## Implementation progress (2026-10-27)
+
+The pure `ocw_core::bundle` model now implements observed half-open launch membership, capped
+buyer/event history, original-bag proportional sale allocation, later buys, balance-continuity
+checks, separate proceeds, weighted tier gates and direct/one-hop funding attribution.
+Funding facts must come from validated external evidence; Jito corroboration cannot admit a
+wallet. More than 50 observed children excludes the root and marks coverage partial. Known
+roots/intermediates are excluded, cycles remain unknown, and unrelated roots must be evaluated
+separately rather than pooled to meet minimums.
+
+Threshold comparisons use integer bounds that certify the exact answer in normal cases, with
+checked rational arithmetic at ambiguous boundaries. If a boundary cannot be resolved within
+those bounds, `threshold_uncertain` is reported instead of guessing a tier. Displayed basis
+points are explicitly a conservative lower bound. No floating-point division sets a tier.
+
+This model does not yet supply the live capture/store/RPC/card integration described above.
+It does not make a provider-completeness claim. CTO cards still show bundle status unavailable;
+no supplied key activates an unfinished bundle path.

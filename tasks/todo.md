@@ -123,3 +123,15 @@ CTO implementation:
 - [x] Independent worker health, trade-failure isolation and checked shutdown.
 - [x] Accurate claim wording and unavailable bundle/price history.
 - [ ] Real DexScreener/Discord acceptance after explicit live authorization.
+
+Bundle accounting increment:
+
+- [x] Bounded half-open launch membership and ordered buyer-event capture model.
+- [x] Original-bag proportional allocation, later-buy handling and balance-gap guards.
+- [x] Native-cost-weighted sold fractions, minimums and conservative exact tier comparisons.
+- [x] Direct/one-hop funding classification, known-account exclusions and fan-out cap.
+- [ ] Wire live capture and durable launch storage into the collector.
+- [ ] Fetch confirmed funding/supply/price facts and connect persisted progress to CTO cards.
+
+The pure bundle model is not yet connected to live cards. CTO bundle fields continue to say
+unavailable. No launch or funding facts are fabricated by these unit-testable rules.

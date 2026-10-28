@@ -41,18 +41,18 @@ pub(crate) struct Handle {
     origin: Instant,
 }
 impl Handle {
-    pub fn submit(&self, decision: Decision, generation: u64) {
+    pub fn submit(&self, decision: Decision, generation: u64) -> &'static str {
         if !self.active.load(Ordering::Relaxed) {
             inc(&self.health.delivery_dropped);
-            return;
+            return "inactive";
         }
         let Some(c) = Candidate::new(decision, &self.boot, self.origin, generation) else {
             inc(&self.health.delivery_rejected);
-            return;
+            return "invalid";
         };
         let Ok(mut queue) = self.queue.try_lock() else {
             inc(&self.health.delivery_dropped);
-            return;
+            return "busy";
         };
         let expired = queue.prune(Instant::now(), value(&self.health.generation));
         self.health
@@ -65,8 +65,10 @@ impl Handle {
                 .delivery_dropped
                 .fetch_add(queue.replaced - replaced, Ordering::Relaxed);
             self.notify.notify_one();
+            "queued"
         } else {
             inc(&self.health.delivery_dropped);
+            "queue_rejected"
         }
     }
 }
@@ -222,3 +224,6 @@ impl Drop for Runtime {
 
 #[cfg(test)]
 mod tests_replay;
+
+#[cfg(test)]
+mod tests_linked;

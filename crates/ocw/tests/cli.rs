@@ -316,6 +316,28 @@ fn delivery_replay_is_read_only_ignores_secrets_and_rejects_live_or_configuratio
     assert!(!String::from_utf8_lossy(&result.stdout).contains("private-invalid-secret"));
     assert!(!dir.path().join("data").exists());
     assert_eq!(before, fs::read(&path).unwrap());
+    let capture = dir.path().join("linked.ocwcap");
+    let mut segment = ocw_core::capture::Segment::create(&capture).unwrap();
+    segment.append(&ocw_core::capture::Record::control(1,"boot1",1,0,1000,"boot",json!({"config":ocw_core::config::Config::default(),"execution_schema":1,"route_schema":1,"staging_enabled":true,"initial_state":"cold","volume_enabled":true}).to_string().into())).unwrap();
+    segment.sync().unwrap();
+    let linked = Command::new(env!("CARGO_BIN_EXE_ocw"))
+        .args([
+            "--replay-linked",
+            capture.to_str().unwrap(),
+            path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        linked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&linked.stdout).unwrap();
+    assert_eq!(report["volume_delivery_link_replayed"], true);
+    assert_eq!(report["linked_candidates"], 0);
+
     for flags in [
         vec!["--live"],
         vec!["--config", "missing.toml"],

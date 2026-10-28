@@ -371,9 +371,16 @@ fn suspected_application_liveness_suppresses_a_fresh_signal_without_fabricating_
     };
     pipeline.emit_volume(vec![decision.clone()], 0);
     assert_eq!(health.snapshot()["application"]["suppressed_candidates"], 1);
+    let suppressed = records.try_recv().unwrap();
+    assert_eq!(suppressed.kind, "volume_route");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&suppressed.payload).unwrap()["status"],
+        "suppressed"
+    );
     assert!(records.try_recv().is_err());
     set_state(&health.application_state, "observed");
     pipeline.emit_volume(vec![decision], 0);
+    assert_eq!(records.try_recv().unwrap().kind, "volume_route");
     assert_eq!(records.try_recv().unwrap().kind, "volume_preview");
     assert!(records.try_recv().is_err());
 }

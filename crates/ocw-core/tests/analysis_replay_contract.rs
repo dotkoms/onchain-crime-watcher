@@ -242,3 +242,14 @@ fn spend_replay_checks_starting_usage_reservations_and_never_resets_on_clock_rol
         assert_eq!(before, std::fs::read(path).unwrap());
     }
 }
+
+#[test]
+fn a_route_without_a_recomputed_detector_candidate_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("route.ocwcap");
+    let mut segment = Segment::create(&path).unwrap();
+    segment.append(&record(1,0,"boot",json!({"config":Config::default(),"execution_schema":1,"route_schema":1,"staging_enabled":true,"initial_state":"cold","volume_enabled":true}))).unwrap();
+    segment.append(&record(2,1,"volume_route",json!({"decision":{},"apply_ms":1,"generation":1,"feed_connected":true,"status":"queued"}))).unwrap();
+    segment.sync().unwrap();
+    assert!(analysis::run(&path, |_, _| Ok(())).is_err());
+}

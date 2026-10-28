@@ -14,6 +14,14 @@ pub fn run(
     path: &Path,
     mut emit: impl FnMut(&Decision, u64) -> Result<(), String>,
 ) -> Result<Value, String> {
+    run_with_routes(path, &mut emit, |_, _, _, _| Ok(()))
+}
+pub(crate) fn run_with_routes(
+    path: &Path,
+    mut emit: impl FnMut(&Decision, u64) -> Result<(), String>,
+    mut route: impl FnMut(&str, u64, &Decision, &str) -> Result<(), String>,
+) -> Result<Value, String> {
+    let mut routing = super::routing::Routing::default();
     let mut config: Option<Config> = None;
     let mut decoder = None;
     let mut engine = None;
@@ -99,6 +107,7 @@ pub fn run(
                 };
                 controller.configure(&value)?;
                 spend.configure(&value)?;
+                routing.configure(&value)?;
                 config = Some(initial);
                 return Ok(());
             }
@@ -112,6 +121,12 @@ pub fn run(
             let mut produced = Vec::new();
             let mut applied_now = now;
             match record.kind.as_str() {
+                "volume_route" => {
+                    let value: Value = serde_json::from_slice(&record.payload)
+                        .map_err(|_| "invalid volume routing record")?;
+                    let (decision, status) = routing.apply(&value, record.generation)?;
+                    route(&record.boot_id, record.generation, &decision, &status)?;
+                }
                 "watch_start" | "watch_plan" => {
                     let step: Value = serde_json::from_slice(&record.payload)
                         .map_err(|_| "invalid watch controller record")?;
@@ -253,6 +268,7 @@ pub fn run(
                 _ => {}
             }
             for decision in produced {
+                routing.produced(&decision, applied_now, record.generation)?;
                 decisions += 1;
                 if decisions > 1_000_000 {
                     return Err("analysis replay decision cap exceeded".into());
@@ -279,7 +295,8 @@ pub fn run(
     }
     controller.complete()?;
     spend.complete()?;
-    let mut summary = json!({"event":"analysis_replay_complete","execution_schema":1,"records":records,"frames":frames,"accepted_trades":trades,"watch_operations":subscriptions,"decisions":decisions,"input_sha256":format!("{:x}",input_hash.finalize()),"decision_sha256":format!("{:x}",decision_hash.finalize()),"volume":engine.as_ref().map(Engine::stats),"active_mints":engine.as_ref().map(Engine::active_mints),"alerts_sent":0,"network":"disabled","initial_state":"recorded_cold_boot","delivery_replayed":false,"external_responses_replayed":false,"coverage":"only the supplied uninterrupted capture; provider completeness unverified"});
+    routing.complete()?;
+    let mut summary = json!({"event":"analysis_replay_complete","execution_schema":1,"boot_id":boot,"records":records,"frames":frames,"accepted_trades":trades,"watch_operations":subscriptions,"decisions":decisions,"input_sha256":format!("{:x}",input_hash.finalize()),"decision_sha256":format!("{:x}",decision_hash.finalize()),"volume":engine.as_ref().map(Engine::stats),"active_mints":engine.as_ref().map(Engine::active_mints),"alerts_sent":0,"network":"disabled","initial_state":"recorded_cold_boot","delivery_replayed":false,"external_responses_replayed":false,"coverage":"only the supplied uninterrupted capture; provider completeness unverified"});
     summary.as_object_mut().expect("summary object").extend(
         controller
             .summary()
@@ -291,5 +308,12 @@ pub fn run(
         .as_object_mut()
         .expect("summary object")
         .extend(spend.summary().as_object().expect("spend summary").clone());
+    summary.as_object_mut().expect("summary object").extend(
+        routing
+            .summary()
+            .as_object()
+            .expect("route summary")
+            .clone(),
+    );
     Ok(summary)
 }

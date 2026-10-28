@@ -49,7 +49,25 @@ upstream subscription delivery, billing, shared global-pause causes and external
 not independently reconstructed. `http_classification_replayed` and `other_lanes_replayed`
 remain false. No provider or Discord acceptance is implied.
 
-[Analysis replay](analysis-replay.md) separately verifies recorded decoder/volume decisions,
-automatic watch membership, and local feed-spend credits. There is no claim yet that these two
-recordings form one fully linked end-to-end backtest. Historical evaluation, multi-segment
-state reconstruction, threshold calibration and additional response tapes remain outstanding.
+## Paired analysis and delivery verification
+
+```sh
+ocw --replay-linked /private/path/cold-boot.ocwcap /private/path/history/observations.ocwh --json
+```
+
+New captures declare `route_schema: 1` and record a route for every still-fresh detector
+candidate, including health suppression, disabled delivery and queue rejection. Analysis replay
+recomputes those candidates and checks the route's decision, clock and generation. Paired replay
+then matches every initial queue insertion to its recomputed source route, including rejection
+results. Missing routes, extra candidates, changed decisions/admission, mixed boots and
+incomplete tails fail. Retries stay attached to their original reservation; they are not new
+detector candidates. A zero-candidate result explicitly reports zero; it supplies no signal-quality
+evidence.
+
+The command is read-only, uses recorded configuration, and requires a single uninterrupted
+cold-boot capture and same-boot delivery evidence. It verifies at most 100,000 candidate routes,
+with at most 4,096 eligible decisions awaiting route records. Older captures lacking routing
+records cannot pass this stronger mode. `volume_delivery_link_replayed:true` covers the
+volume detector-to-staging-policy path, not raw HTTP classification or whole-provider truth.
+Other notification lanes and historical evaluation retain their separate coverage limits.
+Multi-segment state reconstruction and threshold calibration remain outstanding.

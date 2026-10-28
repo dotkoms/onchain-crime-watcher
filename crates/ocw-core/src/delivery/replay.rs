@@ -311,6 +311,12 @@ fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
 
 /// Replays the staging-volume lane only. Other lanes and raw HTTP classification remain separate.
 pub fn run(path: &Path) -> Result<Value, String> {
+    run_with_inputs(path, |_, _, _| Ok(()))
+}
+pub(crate) fn run_with_inputs(
+    path: &Path,
+    mut input_check: impl FnMut(&str, &Value, &str) -> Result<(), String>,
+) -> Result<Value, String> {
     let mut model: Option<Model> = None;
     let mut sessions = 0u64;
     let mut steps = 0u64;
@@ -374,6 +380,9 @@ pub fn run(path: &Path) -> Result<Value, String> {
                 }
                 output
             };
+            if matches!(op, "start" | "insert") {
+                input_check(op, data, &entry.boot)?;
+            }
             steps += 1;
             let bytes = serde_json::to_vec(&json!([op, result]))
                 .map_err(|_| "invalid replayed policy decision")?;

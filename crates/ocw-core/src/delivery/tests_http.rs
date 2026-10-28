@@ -390,7 +390,8 @@ async fn configured_runtime_checks_identity_uses_worker_and_retains_process_owne
     )
     .await
     .unwrap();
-    let origin = Instant::now();
+    let capture = super::tests_linked::capture(dir.path());
+    let origin = capture.origin;
     let context = super::Context {
         data_dir: data_dir.clone(),
         health: health.clone(),
@@ -410,14 +411,57 @@ async fn configured_runtime_checks_identity_uses_worker_and_retains_process_owne
             .unwrap();
     drop(guard);
     assert!(crate::storage::ProcessLock::acquire(&data_dir).is_err());
-    runtime
-        .handle
-        .submit(candidate(Verdict::Fire, 1, origin).decision, 1);
+    let status = runtime.handle.submit(capture.decision.clone(), 1);
+    let capture_path = capture.finish(status);
     until(|| health.snapshot()["staging_delivery"]["sent"] == 1).await;
     runtime.shutdown().await.unwrap();
     history.shutdown().await.unwrap();
     let replay = super::replay::run(&data_dir.join("history/observations.ocwh")).unwrap();
     assert_eq!(replay["observed_sent"], 1);
+    let linked =
+        crate::replay::linked::run(&capture_path, &data_dir.join("history/observations.ocwh"))
+            .unwrap();
+    assert_eq!(linked["volume_delivery_link_replayed"], true);
+    assert_eq!(linked["linked_candidates"], 1);
+    let repeat =
+        crate::replay::linked::run(&capture_path, &data_dir.join("history/observations.ocwh"))
+            .unwrap();
+    assert_eq!(linked, repeat);
+    for status in ["queue_rejected", "busy"] {
+        let altered = tempfile::tempdir().unwrap();
+        let source = super::tests_linked::capture(altered.path()).finish(status);
+        assert!(
+            crate::replay::linked::run(&source, &data_dir.join("history/observations.ocwh"))
+                .is_err()
+        );
+    }
+    let forged = tempfile::tempdir().unwrap();
+    let root = forged.path().join("history");
+    let mut journal = crate::history::Journal::open(&root, 16 * 1024 * 1024, "boot1", 1).unwrap();
+    let mut duplicated = false;
+    crate::history::read(
+        &data_dir.join("history/observations.ocwh"),
+        16 * 1024 * 1024,
+        |entry| {
+            if entry.kind == "boot" {
+                return Ok(());
+            }
+            journal.append(entry.wall_ms, &entry.kind, entry.data.clone())?;
+            if !duplicated && entry.kind == "delivery_replay" && entry.data["op"] == "insert" {
+                let mut duplicate = entry.data;
+                duplicate["data"]["accepted"] = false.into();
+                journal.append(entry.wall_ms, "delivery_replay", duplicate)?;
+                duplicated = true;
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    journal.sync().unwrap();
+    assert!(duplicated);
+    assert!(super::replay::run(&root.join("observations.ocwh")).is_ok());
+    assert!(crate::replay::linked::run(&capture_path, &root.join("observations.ocwh")).is_err());
+
     assert_eq!(replay["attempts"], 1);
     assert!(crate::storage::ProcessLock::acquire(&data_dir).is_ok());
     assert_eq!(endpoint.seen.lock().unwrap().len(), 2); // readiness GET, then one POST

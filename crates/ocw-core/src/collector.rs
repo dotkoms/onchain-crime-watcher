@@ -344,12 +344,18 @@ impl Pipeline {
     fn emit_volume(&mut self, decisions: Vec<Decision>, now: u64) {
         for decision in decisions {
             if let Some(preview) = decision.card(now) {
-                if !self.health.feed_connected() {
+                let connected = self.health.feed_connected();
+                let status = if !connected {
                     inc(&self.health.app_suppressed);
+                    "suppressed"
+                } else if let Some(sender) = &self.delivery {
+                    sender.submit(decision.clone(), self.generation)
+                } else {
+                    "disabled"
+                };
+                self.control("volume_route",json!({"decision":decision,"apply_ms":now,"generation":self.generation,"feed_connected":connected,"status":status}));
+                if !connected {
                     continue;
-                }
-                if let Some(sender) = &self.delivery {
-                    sender.submit(decision.clone(), self.generation);
                 }
                 let event = json!({"event":"volume_preview","source":"live_feed","decision":decision,"preview":preview,"sent":false});
                 self.control("volume_preview", event.clone());
@@ -726,7 +732,7 @@ async fn run_inner(
         last_trade: None,
         rpc,
     };
-    pipeline.control("boot",json!({"config":config,"mode":if options.fixture.is_some(){"fixture"}else{"live"},"initial_state":"cold","decoder_schema":1,"execution_schema":1,"watch_schema":1,"spend_schema":1,"volume_enabled":options.preview_volume}));
+    pipeline.control("boot",json!({"config":config,"mode":if options.fixture.is_some(){"fixture"}else{"live"},"initial_state":"cold","decoder_schema":1,"execution_schema":1,"watch_schema":1,"spend_schema":1,"route_schema":1,"staging_enabled":options.staging_delivery,"volume_enabled":options.preview_volume}));
     println!(
         "{}",
         json!({"event":"collector_boot","health":format!("http://{address}/health"),"mode":if options.fixture.is_some(){"fixture"}else{"live"},"paid_requested":options.paid,"staging_delivery":options.staging_delivery,"signals_enabled":options.staging_delivery,"production_signals_enabled":false})

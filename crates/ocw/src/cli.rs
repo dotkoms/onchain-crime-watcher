@@ -15,6 +15,7 @@ struct Cli {
     analysis_replay: Option<PathBuf>,
     delivery_replay: Option<PathBuf>,
     linked_replay: Option<(PathBuf, PathBuf)>,
+    notification_replay: Option<PathBuf>,
     inspect: Option<PathBuf>,
     live: bool,
     status: bool,
@@ -35,13 +36,20 @@ fn parse() -> Result<Option<Cli>, String> {
         match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "ocw [--status]                               Waiting-for-data status (default)\nocw --replay-capture <segment.ocwcap> [--json] Recorded real frames and volume previews\nocw --replay-analysis <segment.ocwcap> [--json] Exact recorded analysis steps (new captures)\nocw --replay-delivery <observations.ocwh> [--json] Recorded staging policy and outcomes\nocw --replay-linked <capture.ocwcap> <observations.ocwh> [--json] Paired analysis/delivery verification\nocw --config <file> --fixture <raw-JSONL>     Recorded frame inspection\nocw --live --config <file> [--run-for-secs N] [--enable-paid] [--preview-volume] [--enable-staging-delivery]\nocw --config <file> --dry | --check-config | --preflight | --init-spend-ledger\nocw --inspect-capture <segment.ocwcap>\nNetworking requires --live. No sample data or generated signals are supplied.\nPaid mode requires feed.mint or feed.auto_watch, OCW_PUMPPORTAL_KEY and an explicitly initialized ledger.\nStaging delivery requires its explicit flag, OCW_DISCORD_STAGING_URL and delivery.staging_channel_id. Production delivery remains disabled."
+                    "ocw [--status]                               Waiting-for-data status (default)\nocw --replay-capture <segment.ocwcap> [--json] Recorded real frames and volume previews\nocw --replay-analysis <segment.ocwcap> [--json] Exact recorded analysis steps (new captures)\nocw --replay-delivery <observations.ocwh> [--json] Recorded staging policy and outcomes\nocw --replay-linked <capture.ocwcap> <observations.ocwh> [--json] Paired analysis/delivery verification\nocw --replay-notifications <observations.ocwh> [--json] Recorded CTO/bundle/status/outage receipts\nocw --config <file> --fixture <raw-JSONL>     Recorded frame inspection\nocw --live --config <file> [--run-for-secs N] [--enable-paid] [--preview-volume] [--enable-staging-delivery]\nocw --config <file> --dry | --check-config | --preflight | --init-spend-ledger\nocw --inspect-capture <segment.ocwcap>\nNetworking requires --live. No sample data or generated signals are supplied.\nPaid mode requires feed.mint or feed.auto_watch, OCW_PUMPPORTAL_KEY and an explicitly initialized ledger.\nStaging delivery requires its explicit flag, OCW_DISCORD_STAGING_URL and delivery.staging_channel_id. Production delivery remains disabled."
                 );
                 return Ok(None);
             }
             "--config" => cli.config = Some(args.next().ok_or("--config requires a path")?.into()),
             "--fixture" => {
                 cli.fixture = Some(args.next().ok_or("--fixture requires a path")?.into())
+            }
+            "--replay-notifications" => {
+                cli.notification_replay = Some(
+                    args.next()
+                        .ok_or("--replay-notifications requires a path")?
+                        .into(),
+                );
             }
             "--replay-linked" => {
                 let capture = args
@@ -117,6 +125,7 @@ fn parse() -> Result<Option<Cli>, String> {
         cli.analysis_replay.is_some(),
         cli.delivery_replay.is_some(),
         cli.linked_replay.is_some(),
+        cli.notification_replay.is_some(),
     ]
     .into_iter()
     .filter(|b| *b)
@@ -146,6 +155,7 @@ fn parse() -> Result<Option<Cli>, String> {
         && cli.analysis_replay.is_none()
         && cli.delivery_replay.is_none()
         && cli.linked_replay.is_none()
+        && cli.notification_replay.is_none()
     {
         return Err("--json is only valid for capture replay".into());
     }
@@ -173,6 +183,15 @@ fn read_config(path: PathBuf) -> Result<Config, String> {
     Config::parse(&text)
 }
 async fn execute(cli: Cli) -> Result<(), String> {
+    if let Some(path) = cli.notification_replay {
+        if cli.config.is_some() {
+            return Err("notification replay uses recorded evidence; omit --config".into());
+        }
+        let result = ocw_core::notifications::run(&path)?;
+        println!("{result}");
+        return Ok(());
+    }
+
     if let Some((capture, history)) = cli.linked_replay {
         if cli.config.is_some() {
             return Err("linked replay uses recorded configuration; omit --config".into());

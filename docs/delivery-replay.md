@@ -43,7 +43,8 @@ and one million history entries.
 ## Limits
 
 This command verifies the recorded **staging-volume lane**, not the whole Discord system.
-CTO posts, bundle edits, status notifications and wallet delivery are outside this tape. Feed
+CTO posts, bundle edits and status/outage notifications have a separate
+[normalized receipt replay](notification-replay.md). Wallet delivery is not implemented. Feed
 health and normalized HTTP outcomes are observed inputs. Raw HTTP parsing/classification,
 upstream subscription delivery, billing, shared global-pause causes and external coverage are
 not independently reconstructed. `http_classification_replayed` and `other_lanes_replayed`
@@ -59,13 +60,15 @@ New captures declare `route_schema: 1` and record a route for every still-fresh 
 candidate, including health suppression, disabled delivery and queue rejection. Analysis replay
 recomputes those candidates and checks the route's decision, clock and generation. Paired replay
 then matches every initial queue insertion to its recomputed source route, including rejection
-results. Missing routes, extra candidates, changed decisions/admission, mixed boots and
+results. Missing routes, extra candidates, changed decisions/admission, mixed analysis boots and
 incomplete tails fail. Retries stay attached to their original reservation; they are not new
 detector candidates. A zero-candidate result explicitly reports zero; it supplies no signal-quality
 evidence.
 
 The command is read-only, uses recorded configuration, and requires a single uninterrupted
-cold-boot capture and same-boot delivery evidence. It verifies at most 100,000 candidate routes,
+cold-boot capture and same-boot delivery evidence. Within an accumulated history file it selects
+the capture’s boot; other boots are excluded from policy reconstruction and identified by the
+`selected_boot` field. Integrity is still checked across the whole supplied file. It verifies at most 100,000 candidate routes,
 with at most 4,096 eligible decisions awaiting route records. Older captures lacking routing
 records cannot pass this stronger mode. `volume_delivery_link_replayed:true` covers the
 volume detector-to-staging-policy path, not raw HTTP classification or whole-provider truth.

@@ -113,7 +113,9 @@ Recorded analysis execution increment:
 - [x] Recompute automatic watch-controller choices and verify applied membership against recorded frames/timers.
 - [x] Replay starting feed spend, daily credits, reservations and all recorded billable frames.
 - [x] Record/replay staging-volume queue admission, attention budgets, payloads and normalized outcomes.
-- [ ] Link analysis/delivery tapes end to end; replay subscription transport, raw external responses and other delivery lanes.
+- [x] Pair same-boot detector routing and staging queue/admission evidence; reject unmatched candidates.
+- [x] Record/replay normalized CTO, bundle, status and minimal-outage request identities and receipts.
+- [ ] Replay other-family source/admission decisions, subscription transport and raw external responses.
 - [ ] Multi-segment/checkpoint replay and real historical train/test threshold evaluation.
 
 See [analysis replay](../docs/analysis-replay.md); this is not a complete delivery backtest.

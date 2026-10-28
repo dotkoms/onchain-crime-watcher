@@ -352,3 +352,37 @@ fn delivery_replay_is_read_only_ignores_secrets_and_rejects_live_or_configuratio
         assert!(!result.status.success());
     }
 }
+
+#[test]
+fn notification_replay_uses_only_its_recorded_evidence() {
+    use ocw_core::history::Journal;
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("history");
+    let mut journal = Journal::open(&root, 16 * 1024 * 1024, "notifyboot", 1).unwrap();
+    for v in [
+        json!({"session":1,"op":"start","data":{"schema":1,"boot":"notifyboot","family":"status","target":"a".repeat(64),"message":null,"pending":false}}),
+        json!({"session":1,"op":"end","data":{"requests":0}}),
+    ] {
+        journal.append(1, "notification_replay", v).unwrap();
+    }
+    journal.sync().unwrap();
+    let path = root.join("observations.ocwh");
+    let before = fs::read(&path).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ocw"))
+        .current_dir(dir.path())
+        .env("OCW_DISCORD_STATUS_URL", "private-invalid-secret")
+        .args(["--replay-notifications", path.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["alerts_sent"], 0);
+    assert_eq!(report["notification_receipts_replayed"], true);
+    assert!(!dir.path().join("data").exists());
+    assert_eq!(before, fs::read(path).unwrap());
+}

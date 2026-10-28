@@ -33,3 +33,5 @@ pub mod setup;
 pub mod cto;
 
 pub mod bundle;
+
+pub mod notifications;

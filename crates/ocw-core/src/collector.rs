@@ -575,6 +575,24 @@ async fn run_inner(
             "disabled"
         },
     );
+    let mut history_runtime = if config.history.enabled {
+        Some(
+            crate::history::Runtime::start(
+                config.data_dir.join("history"),
+                boot.clone(),
+                config.history.max_bytes,
+                health.clone(),
+                lock.clone(),
+            )
+            .await?,
+        )
+    } else {
+        set_state(&health.history_state, "disabled");
+        None
+    };
+    let history = history_runtime
+        .as_ref()
+        .map(|runtime| runtime.handle.clone());
     let mut bundle_runtime = if config.bundle.enabled {
         Some(
             crate::bundle::runtime::Runtime::start(
@@ -631,6 +649,10 @@ async fn run_inner(
                         lock: Arc::new(std::sync::Mutex::new(())),
                         reads: Arc::new(tokio::sync::Semaphore::new(2)),
                     }),
+                crate::notifications::Evidence {
+                    boot: boot.clone(),
+                    history: history.clone(),
+                },
             )
             .await?,
         )
@@ -646,31 +668,16 @@ async fn run_inner(
                 health.clone(),
                 global_pause.clone(),
                 lock.clone(),
-                boot.clone(),
+                crate::notifications::Evidence {
+                    boot: boot.clone(),
+                    history: history.clone(),
+                },
             )
             .await?,
         )
     } else {
         None
     };
-    let mut history_runtime = if config.history.enabled {
-        Some(
-            crate::history::Runtime::start(
-                config.data_dir.join("history"),
-                boot.clone(),
-                config.history.max_bytes,
-                health.clone(),
-                lock.clone(),
-            )
-            .await?,
-        )
-    } else {
-        set_state(&health.history_state, "disabled");
-        None
-    };
-    let history = history_runtime
-        .as_ref()
-        .map(|runtime| runtime.handle.clone());
     let mut delivery_runtime = if options.staging_delivery {
         Some(
             delivery::Runtime::start(
@@ -825,16 +832,21 @@ async fn run_inner(
         Some(sender) => sender.shutdown().await,
         None => Ok(()),
     };
-    // Delivery's final receipt and queue-clear evidence must precede history sealing.
-    let history_result = match history_runtime {
-        Some(runtime) => runtime.shutdown().await,
-        None => Ok(()),
-    };
+    // Preserve final worker receipts and the last outage before sealing history.
     if result.is_err() {
         set_state(&health.feed_state, "failed");
         pipeline.control("outage", json!({"class":"collector_failure"}));
         if options.fixture.is_none() {
-            outage::notify(secrets.webhook.as_deref(), &health, &global_pause).await;
+            outage::notify(
+                secrets.webhook.as_deref(),
+                &health,
+                &global_pause,
+                &crate::notifications::Evidence {
+                    boot: pipeline.boot.clone(),
+                    history: history.clone(),
+                },
+            )
+            .await;
         }
     } else {
         set_state(
@@ -850,6 +862,10 @@ async fn run_inner(
         "shutdown",
         json!({"operation_clean":result.is_ok(),"capture_flush":"pending"}),
     );
+    let history_result = match history_runtime {
+        Some(runtime) => runtime.shutdown().await,
+        None => Ok(()),
+    };
     let capture_result = capture::shutdown(
         pipeline.tap,
         async move {

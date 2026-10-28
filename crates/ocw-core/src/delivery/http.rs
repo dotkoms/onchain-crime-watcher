@@ -22,6 +22,7 @@ pub(crate) struct Report {
 }
 #[derive(Clone)]
 pub(crate) struct Http {
+    tape: Option<crate::notifications::Trace>,
     client: reqwest::Client,
     url: Url,
     channel: String,
@@ -35,6 +36,7 @@ impl Http {
         global: Arc<Pause>,
     ) -> Result<Self, String> {
         Ok(Self {
+            tape: None,
             client: discord::client(timeout)?,
             url: discord::webhook_url(raw)?,
             channel: channel.into(),
@@ -44,6 +46,7 @@ impl Http {
     #[cfg(test)]
     pub fn local(url: Url, global: Arc<Pause>) -> Self {
         Self {
+            tape: None,
             client: discord::client(Duration::from_secs(2)).unwrap(),
             url,
             channel: "22".into(),
@@ -78,13 +81,29 @@ impl Http {
             "staging webhook readiness failed (endpoint and credentials redacted)".into()
         })
     }
-    pub async fn post(&self, payload: &Value, expires: Instant) -> Report {
-        self.send(
+    pub fn trace(&mut self, evidence: &crate::notifications::Evidence, family: &str) {
+        self.tape =
+            crate::notifications::Trace::new(evidence, family, &self.identity(), None, false);
+    }
+    pub async fn post_named(&self, key: &str, payload: &Value, expires: Instant) -> Report {
+        self.send_taped(
             self.url.clone(),
             reqwest::Method::POST,
             payload,
             expires,
             None,
+            key,
+        )
+        .await
+    }
+    pub async fn post(&self, payload: &Value, expires: Instant) -> Report {
+        self.send_taped(
+            self.url.clone(),
+            reqwest::Method::POST,
+            payload,
+            expires,
+            None,
+            "post",
         )
         .await
     }
@@ -98,8 +117,31 @@ impl Http {
         let mut url = self.url.clone();
         url.set_path(&format!("{}/messages/{id}", url.path()));
         url.set_query(None);
-        self.send(url, reqwest::Method::PATCH, payload, expires, Some(id))
+        self.send_taped(url, reqwest::Method::PATCH, payload, expires, Some(id), id)
             .await
+    }
+    async fn send_taped(
+        &self,
+        url: Url,
+        method: reqwest::Method,
+        payload: &Value,
+        expires: Instant,
+        message_id: Option<&str>,
+        key: &str,
+    ) -> Report {
+        let attempt = expires
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+            .and_then(|ttl| {
+                self.tape
+                    .as_ref()
+                    .map(|t| t.begin(method.as_str(), key, message_id, payload, ttl))
+            });
+        let report = self.send(url, method, payload, expires, message_id).await;
+        if let Some(attempt) = attempt {
+            attempt.finish(&report.outcome, report.pause);
+        }
+        report
     }
     async fn send(
         &self,

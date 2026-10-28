@@ -204,6 +204,10 @@ async fn rate_limit_uses_the_longest_delay_and_shares_global_pause_with_status()
         Some("https://discord.com/api/webhooks/1/private-token"),
         &health,
         &global,
+        &crate::notifications::Evidence {
+            boot: "unit".into(),
+            history: None,
+        },
     )
     .await;
     assert_eq!(health.snapshot()["outage"]["unknown_or_failed"], 1);
@@ -427,6 +431,40 @@ async fn configured_runtime_checks_identity_uses_worker_and_retains_process_owne
         crate::replay::linked::run(&capture_path, &data_dir.join("history/observations.ocwh"))
             .unwrap();
     assert_eq!(linked, repeat);
+    let accumulated = tempfile::tempdir().unwrap();
+    let root = accumulated.path().join("history");
+    let mut journal = crate::history::Journal::open(&root, 16 * 1024 * 1024, "boot1", 1).unwrap();
+    let mut last = 1;
+    crate::history::read(
+        &data_dir.join("history/observations.ocwh"),
+        16 * 1024 * 1024,
+        |entry| {
+            last = entry.wall_ms;
+            if entry.kind != "boot" {
+                journal.append(entry.wall_ms, &entry.kind, entry.data)?;
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    journal.sync().unwrap();
+    drop(journal);
+    let mut journal =
+        crate::history::Journal::open(&root, 16 * 1024 * 1024, "boot2", last).unwrap();
+    for data in [
+        json!({"op":"start","data":{"schema":1,"boot":"boot2","config":DeliveryConfig::default(),"state":{"clock":0,"refilled":0,"tokens":2,"entries":[]}}}),
+        json!({"op":"clear","data":{"removed":0}}),
+        json!({"op":"end","data":{}}),
+    ] {
+        journal.append(last, "delivery_replay", data).unwrap();
+    }
+    journal.sync().unwrap();
+    let paired =
+        crate::replay::linked::run(&capture_path, &root.join("observations.ocwh")).unwrap();
+    assert_eq!(paired["linked_candidates"], 1);
+    assert_eq!(paired["delivery"]["sessions"], 1);
+    assert_eq!(paired["delivery"]["selected_boot"], "boot1");
+
     for status in ["queue_rejected", "busy"] {
         let altered = tempfile::tempdir().unwrap();
         let source = super::tests_linked::capture(altered.path()).finish(status);

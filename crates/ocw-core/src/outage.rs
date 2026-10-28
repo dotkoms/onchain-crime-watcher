@@ -7,7 +7,12 @@ pub(crate) fn webhook_url(raw: &str) -> Result<Url, String> {
     crate::discord::webhook_url(raw)
 }
 
-pub(crate) async fn notify(raw: Option<&str>, health: &Health, pause: &crate::discord::Pause) {
+pub(crate) async fn notify(
+    raw: Option<&str>,
+    health: &Health,
+    pause: &crate::discord::Pause,
+    evidence: &crate::notifications::Evidence,
+) {
     let Some(raw) = raw else { return };
     if !pause.remaining().is_zero() {
         inc(&health.outage_unknown);
@@ -21,11 +26,32 @@ pub(crate) async fn notify(raw: Option<&str>, health: &Health, pause: &crate::di
         inc(&health.outage_unknown);
         return;
     };
-    send(&client, url, health).await;
+    let tape = crate::notifications::Trace::new(
+        evidence,
+        "outage",
+        &crate::notifications::target(url.as_str()),
+        None,
+        false,
+    );
+    send(&client, url, health, tape).await;
 }
 
-async fn send(client: &reqwest::Client, url: Url, health: &Health) {
+async fn send(
+    client: &reqwest::Client,
+    url: Url,
+    health: &Health,
+    tape: Option<crate::notifications::Trace>,
+) {
     let payload = json!({"content":"OCW trade stream unavailable. Collection stopped; data incomplete. Signal delivery is paused.","allowed_mentions":{"parse":[]}});
+    let attempt = tape.as_ref().map(|t| {
+        t.begin(
+            "POST",
+            "trade_stream",
+            None,
+            &payload,
+            Duration::from_secs(5),
+        )
+    });
     let result = async {
         let mut response = client
             .post(url)
@@ -51,13 +77,20 @@ async fn send(client: &reqwest::Client, url: Url, health: &Health) {
         {
             return Err(());
         }
-        Ok(())
+        Ok(value["id"].as_str().ok_or(())?.to_owned())
     }
     .await;
     if result.is_ok() {
         inc(&health.outage_sent);
     } else {
         inc(&health.outage_unknown);
+    }
+    if let Some(attempt) = attempt {
+        let outcome = match result {
+            Ok(id) => crate::delivery::http::Outcome::Sent(id),
+            Err(_) => crate::delivery::http::Outcome::Unknown,
+        };
+        attempt.finish(&outcome, Duration::ZERO);
     }
     // POST outcome can be ambiguous. M1a never retries it automatically.
 }
@@ -101,13 +134,40 @@ mod tests {
             .timeout(Duration::from_secs(2))
             .build()
             .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let guard = std::sync::Arc::new(crate::storage::ProcessLock::acquire(&data).unwrap());
+        let history = crate::history::Runtime::start(
+            data.join("history"),
+            "outageboot".into(),
+            16 * 1024 * 1024,
+            std::sync::Arc::new(Health::default()),
+            guard,
+        )
+        .await
+        .unwrap();
+        let tape = crate::notifications::Trace::new(
+            &crate::notifications::Evidence {
+                boot: "outageboot".into(),
+                history: Some(history.handle.clone()),
+            },
+            "outage",
+            &"a".repeat(64),
+            None,
+            false,
+        );
         send(
             &client,
             Url::parse(&format!("http://{addr}/?wait=true")).unwrap(),
             &health,
+            tape,
         )
         .await;
         server.await.unwrap();
+        history.shutdown().await.unwrap();
+        let receipts = crate::notifications::run(&data.join("history/observations.ocwh")).unwrap();
+        assert_eq!(receipts["lanes"], serde_json::json!(["outage"]));
+        assert_eq!(receipts["observed_unknown"], 1);
         assert_eq!(health.snapshot()["outage"]["unknown_or_failed"], 1);
         assert_eq!(health.snapshot()["outage"]["sent"], 0);
     }

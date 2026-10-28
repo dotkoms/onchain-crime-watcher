@@ -14,16 +14,11 @@ fn key(boot: &str, generation: u64, decision: &Value) -> Result<String, String> 
 }
 pub fn run(capture: &Path, history: &Path) -> Result<Value, String> {
     let mut expected = BTreeMap::<String, VecDeque<bool>>::new();
-    let mut boot = None::<String>;
     let mut routes = 0u64;
     let analysis = super::analysis::run_with_routes(
         capture,
         |_, _| Ok(()),
         |id, generation, decision: &Decision, status| {
-            if boot.as_ref().is_some_and(|b| b != id) {
-                return Err("linked replay requires one boot".into());
-            }
-            boot = Some(id.into());
             if matches!(status, "queued" | "queue_rejected") {
                 routes += 1;
                 if routes > 100_000 {
@@ -47,41 +42,37 @@ pub fn run(capture: &Path, history: &Path) -> Result<Value, String> {
             "linked replay requires recorded staging-enabled routing and volume analysis".into(),
         );
     }
-    boot = Some(
-        analysis["boot_id"]
-            .as_str()
-            .ok_or("analysis boot identity missing")?
-            .to_owned(),
-    );
+    let selected_boot = analysis["boot_id"]
+        .as_str()
+        .ok_or("analysis boot identity missing")?
+        .to_owned();
     let mut linked = 0u64;
-    let delivery = delivery::replay::run_with_inputs(history, |op, data, id| {
-        if boot.as_ref().is_some_and(|b| b != id) {
-            return Err("capture and delivery boot identities differ".into());
-        }
-        if op == "start" {
-            if boot.is_none() {
-                boot = Some(id.into());
+    let delivery =
+        delivery::replay::run_with_inputs(history, Some(&selected_boot), |op, data, id| {
+            if id != selected_boot {
+                return Err("capture and delivery boot identities differ".into());
             }
-            return Ok(());
-        }
-        let c = &data["candidate"];
-        if c["reserved"] == true || c["attempts"].as_u64().is_some_and(|n| n > 0) {
-            return Ok(());
-        }
-        let generation = c["generation"]
-            .as_u64()
-            .ok_or("delivery candidate generation missing")?;
-        let key = key(id, generation, &c["decision"])?;
-        let value = expected
-            .get_mut(&key)
-            .and_then(VecDeque::pop_front)
-            .ok_or("delivery candidate has no matching recomputed route")?;
-        if data["accepted"] != value {
-            return Err("queue admission differs between analysis and delivery tapes".into());
-        }
-        linked += 1;
-        Ok(())
-    })?;
+            if op == "start" {
+                return Ok(());
+            }
+            let c = &data["candidate"];
+            if c["reserved"] == true || c["attempts"].as_u64().is_some_and(|n| n > 0) {
+                return Ok(());
+            }
+            let generation = c["generation"]
+                .as_u64()
+                .ok_or("delivery candidate generation missing")?;
+            let key = key(id, generation, &c["decision"])?;
+            let value = expected
+                .get_mut(&key)
+                .and_then(VecDeque::pop_front)
+                .ok_or("delivery candidate has no matching recomputed route")?;
+            if data["accepted"] != value {
+                return Err("queue admission differs between analysis and delivery tapes".into());
+            }
+            linked += 1;
+            Ok(())
+        })?;
     if expected.values().any(|v| !v.is_empty()) {
         return Err("analysis route is missing from delivery history".into());
     }

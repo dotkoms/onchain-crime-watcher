@@ -90,6 +90,21 @@ fn sent() -> (u16, Value) {
 async fn status_card_posts_once_and_edits_its_durable_identity_after_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("status.json");
+    let data = dir.path().join("data");
+    let guard = Arc::new(ProcessLock::acquire(&data).unwrap());
+    let history = crate::history::Runtime::start(
+        data.join("history"),
+        "statusboot".into(),
+        16 * 1024 * 1024,
+        Arc::new(Health::default()),
+        guard,
+    )
+    .await
+    .unwrap();
+    let evidence = crate::notifications::Evidence {
+        boot: "statusboot".into(),
+        history: Some(history.handle.clone()),
+    };
     let (url, seen, task) = server(vec![verify(), sent(), verify(), sent()]).await;
     let client = discord::client(Duration::from_secs(1)).unwrap();
     let mut card = card::Card::open(
@@ -101,14 +116,21 @@ async fn status_card_posts_once_and_edits_its_durable_identity_after_restart() {
     )
     .await
     .unwrap();
+    card.trace(&evidence, Duration::from_secs(1));
     card.update("real process status").await.unwrap();
     drop(card);
     let mut card = card::Card::open(&path, url, "22".into(), client, Arc::new(Pause::default()))
         .await
         .unwrap();
+    card.trace(&evidence, Duration::from_secs(1));
     card.update("real process status after restart")
         .await
         .unwrap();
+    drop(card);
+    history.shutdown().await.unwrap();
+    let receipts = crate::notifications::run(&data.join("history/observations.ocwh")).unwrap();
+    assert_eq!(receipts["requests"], 2);
+    assert_eq!(receipts["lanes"], json!(["status"]));
     let methods = seen.lock().unwrap().clone();
     task.abort();
     assert_eq!(methods.iter().filter(|(m, _)| m == Method::POST).count(), 1);

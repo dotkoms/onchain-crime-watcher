@@ -311,10 +311,11 @@ fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
 
 /// Replays the staging-volume lane only. Other lanes and raw HTTP classification remain separate.
 pub fn run(path: &Path) -> Result<Value, String> {
-    run_with_inputs(path, |_, _, _| Ok(()))
+    run_with_inputs(path, None, |_, _, _| Ok(()))
 }
 pub(crate) fn run_with_inputs(
     path: &Path,
+    selected_boot: Option<&str>,
     mut input_check: impl FnMut(&str, &Value, &str) -> Result<(), String>,
 ) -> Result<Value, String> {
     let mut model: Option<Model> = None;
@@ -348,7 +349,9 @@ pub(crate) fn run_with_inputs(
             {
                 return Err("delivery replay evidence contains history loss".into());
             }
-            if entry.kind != "delivery_replay" {
+            if entry.kind != "delivery_replay"
+                || selected_boot.is_some_and(|boot| boot != entry.boot)
+            {
                 return Ok(());
             }
             let op = text(&entry.data, "op")?;
@@ -403,6 +406,6 @@ pub(crate) fn run_with_inputs(
         return Err("delivery replay needs complete start and shutdown evidence".into());
     }
     Ok(
-        json!({"event":"delivery_replay_complete","lane":"staging_volume","delivery_policy_replayed":true,"sessions":sessions,"steps":steps,"attempts":attempts,"observed_sent":sent,"observed_unknown":unknown,"alerts_sent":0,"network":"disabled","input_sha256":format!("{:x}",input.finalize()),"decision_sha256":format!("{:x}",decisions.finalize()),"http_classification_replayed":false,"other_lanes_replayed":false,"coverage":"recorded queue and budget decisions with normalized observed outcomes; provider and Discord acceptance unverified"}),
+        json!({"event":"delivery_replay_complete","lane":"staging_volume","selected_boot":selected_boot,"delivery_policy_replayed":true,"sessions":sessions,"steps":steps,"attempts":attempts,"observed_sent":sent,"observed_unknown":unknown,"alerts_sent":0,"network":"disabled","input_sha256":format!("{:x}",input.finalize()),"decision_sha256":format!("{:x}",decisions.finalize()),"http_classification_replayed":false,"other_lanes_replayed":false,"coverage":"recorded queue and budget decisions with normalized observed outcomes; provider and Discord acceptance unverified"}),
     )
 }

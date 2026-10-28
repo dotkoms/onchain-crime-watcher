@@ -378,7 +378,23 @@ mod tests {
             crate::health::set_state(&health.bundle_state, "recording");
             health.pulse(&health.bundle_tick_ms);
             let global = Arc::new(Pause::default());
-            let http = Http::local(endpoint.clone(), global.clone());
+            let history = crate::history::Runtime::start(
+                data.join("history"),
+                "boot".into(),
+                16 * 1024 * 1024,
+                health.clone(),
+                guard.clone(),
+            )
+            .await
+            .unwrap();
+            let mut http = Http::local(endpoint.clone(), global.clone());
+            http.trace(
+                &crate::notifications::Evidence {
+                    boot: "boot".into(),
+                    history: Some(history.handle.clone()),
+                },
+                "cto",
+            );
             let integration = Integration {
                 root: root.clone(),
                 rpc: None,
@@ -490,6 +506,12 @@ mod tests {
             assert_eq!(meta.pending, bad);
             assert!(meta.enriched);
             assert_eq!(meta.tier, 2);
+            drop(context);
+            history.shutdown().await.unwrap();
+            let receipts =
+                crate::notifications::run(&data.join("history/observations.ocwh")).unwrap();
+            assert_eq!(receipts["lanes"], serde_json::json!(["bundle"]));
+            assert_eq!(receipts["requests"], 1);
         }
         assert_eq!(count.load(Ordering::SeqCst), 2);
         drop(server);

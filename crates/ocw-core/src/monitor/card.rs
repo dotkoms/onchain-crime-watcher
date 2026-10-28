@@ -21,6 +21,7 @@ struct State {
     pending: bool,
 }
 pub(super) struct Card {
+    tape: Option<(crate::notifications::Trace, Duration)>,
     path: PathBuf,
     url: Url,
     channel: String,
@@ -78,6 +79,7 @@ impl Card {
             }
         };
         Ok(Self {
+            tape: None,
             path: path.into(),
             url,
             channel,
@@ -87,6 +89,16 @@ impl Card {
             paused: Instant::now(),
             blocked: false,
         })
+    }
+    pub fn trace(&mut self, evidence: &crate::notifications::Evidence, timeout: Duration) {
+        self.tape = crate::notifications::Trace::new(
+            evidence,
+            "status",
+            &self.state.target,
+            self.state.message.clone(),
+            self.state.pending,
+        )
+        .map(|t| (t, timeout));
     }
     fn save(&self) -> Result<(), ()> {
         atomic_write(
@@ -119,6 +131,15 @@ impl Card {
             url.set_query(Some("wait=true"));
             self.client.post(url)
         };
+        let attempt = self.tape.as_ref().map(|(t, ttl)| {
+            t.begin(
+                if initial { "POST" } else { "PATCH" },
+                self.state.message.as_deref().unwrap_or("status"),
+                self.state.message.as_deref(),
+                &payload,
+                *ttl,
+            )
+        });
         let response = request.json(&payload).send().await.map_err(|_| ())?;
         let code = response.status().as_u16();
         let headers = response.headers().clone();
@@ -173,6 +194,9 @@ impl Card {
                 self.state.pending = false;
                 self.save()?;
             }
+            if let Some(attempt) = attempt {
+                attempt.finish(&crate::delivery::http::Outcome::RateLimited, delay);
+            }
             return Err(());
         }
         if !limit_delay.is_zero() {
@@ -185,6 +209,16 @@ impl Card {
                     self.state.pending = false;
                     self.save()?;
                 }
+            }
+            if let Some(attempt) = attempt {
+                attempt.finish(
+                    &if (400..500).contains(&code) {
+                        crate::delivery::http::Outcome::Broken
+                    } else {
+                        crate::delivery::http::Outcome::Unknown
+                    },
+                    limit_delay,
+                );
             }
             return Err(());
         }
@@ -201,6 +235,9 @@ impl Card {
                 .is_some_and(|expected| expected != id)
         {
             self.blocked = true;
+            if let Some(attempt) = attempt {
+                attempt.finish(&crate::delivery::http::Outcome::WrongTarget, limit_delay);
+            }
             return Err(());
         }
         self.state.message = Some(id.into());
@@ -208,6 +245,12 @@ impl Card {
         if self.save().is_err() {
             self.blocked = true;
             return Err(());
+        }
+        if let Some(attempt) = attempt {
+            attempt.finish(
+                &crate::delivery::http::Outcome::Sent(id.into()),
+                limit_delay,
+            );
         }
         Ok(())
     }

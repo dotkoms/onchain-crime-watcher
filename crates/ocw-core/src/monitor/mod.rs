@@ -28,8 +28,9 @@ impl Runtime {
         health: Arc<Health>,
         pause: Arc<Pause>,
         guard: Arc<ProcessLock>,
-        boot: String,
+        evidence: crate::notifications::Evidence,
     ) -> Result<Self, String> {
+        let crate::notifications::Evidence { boot, history } = evidence;
         let deadman = if config.deadman {
             Some(deadman_url(
                 &std::env::var("OCW_DEADMAN_URL").map_err(|_| "OCW_DEADMAN_URL is required")?,
@@ -61,7 +62,16 @@ impl Runtime {
                 let card = match status {
                     Some((url, channel)) => {
                         match card::Card::open(&path, url, channel, client.clone(), pause).await {
-                            Ok(card) => Some(card),
+                            Ok(mut card) => {
+                                card.trace(
+                                    &crate::notifications::Evidence {
+                                        boot: boot.clone(),
+                                        history: history.clone(),
+                                    },
+                                    Duration::from_millis(config.timeout_ms),
+                                );
+                                Some(card)
+                            }
                             Err(_) => {
                                 set_state(&health.monitor_worker_state, "status_unavailable");
                                 let _ = ready.send(Err(()));

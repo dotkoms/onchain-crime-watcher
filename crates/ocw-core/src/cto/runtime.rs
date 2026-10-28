@@ -47,17 +47,19 @@ impl Runtime {
         global: Arc<Pause>,
         health: Arc<Health>,
         integration: Option<crate::bundle::integration::Integration>,
+        evidence: crate::notifications::Evidence,
     ) -> Result<Self, String> {
         let sender = if config.staging_delivery {
             let raw = std::env::var("OCW_DISCORD_CTO_URL")
                 .map_err(|_| "OCW_DISCORD_CTO_URL is required")?;
-            let http = Http::new(
+            let mut http = Http::new(
                 &raw,
                 config.channel_id.as_deref().ok_or("CTO channel required")?,
                 Duration::from_secs(2),
                 global.clone(),
             )?;
             http.verify().await?;
+            http.trace(&evidence, "cto");
             Some(http)
         } else {
             None
@@ -260,7 +262,13 @@ async fn deliver(
         inc(&context.health.cto_budget_dropped);
         return Ok(None);
     }
-    let report = sender.post(&payload, at + Duration::from_secs(120)).await;
+    let report = sender
+        .post_named(
+            &bs58::encode(claim.mint).into_string(),
+            &payload,
+            at + Duration::from_secs(120),
+        )
+        .await;
     let (outcome, id) = match report.outcome {
         Outcome::Sent(id) => {
             inc(&context.health.cto_sent);
@@ -383,7 +391,23 @@ mod tests {
         let health = Arc::new(Health::default());
         set_state(&health.feed_state, "failed");
         let global = Arc::new(Pause::default());
-        let http = Http::local(endpoint, global.clone());
+        let history = crate::history::Runtime::start(
+            data.join("history"),
+            "ctotest".into(),
+            16 * 1024 * 1024,
+            health.clone(),
+            guard.clone(),
+        )
+        .await
+        .unwrap();
+        let mut http = Http::local(endpoint, global.clone());
+        http.trace(
+            &crate::notifications::Evidence {
+                boot: "ctotest".into(),
+                history: Some(history.handle.clone()),
+            },
+            "cto",
+        );
         http.verify().await.unwrap();
         let context = Inputs {
             config: Config::default(),
@@ -408,6 +432,10 @@ mod tests {
         deliver(&context, second, Instant::now()).await.unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 2);
         drop(context);
+        history.shutdown().await.unwrap();
+        let receipts = crate::notifications::run(&data.join("history/observations.ocwh")).unwrap();
+        assert_eq!(receipts["requests"], 2);
+        assert_eq!(receipts["observed_unknown"], 1);
         let restored = Store::open(path).unwrap();
         assert_eq!(
             restored.state.claims[&bs58::encode([2; 32]).into_string()].outcome,
